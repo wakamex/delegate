@@ -85,29 +85,6 @@ def aop_result(run_id: str) -> dict | None:
         return None
 
 
-def lead_turns(transcript_lines) -> list[tuple[datetime, str]]:
-    """The lead's turns in a Claude Code transcript.
-
-    Each is the start time and text of a user message that is not a tool result.
-    """
-    turns = []
-    for line in transcript_lines:
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if entry.get("type") != "user" or entry.get("isMeta") or not entry.get("timestamp"):
-            continue
-        content = (entry.get("message") or {}).get("content")
-        if isinstance(content, list):
-            if any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content):
-                continue
-            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
-        if isinstance(content, str) and content.strip():
-            turns.append((parse_time(entry["timestamp"].replace("Z", "+00:00")), content))
-    return sorted(turns, key=lambda turn: turn[0])
-
-
 def charged_lead_cost(turns, costs, names, opened) -> float:
     """Sum the cost of the turns charged to a task: each turn whose triggering message names one of NAMES (its
     agent-job units or aop runs), and the turn in which the task was opened, which holds its brief. Every cost row
@@ -127,10 +104,10 @@ def charged_lead_cost(turns, costs, names, opened) -> float:
     return round(total, 4)
 
 
-def session_costs(session: str, since: datetime) -> list[tuple[datetime, float]] | None:
-    """Each response's API-equivalent cost in a Claude Code session, from clanker-analytics session-costs,
-    which parses, deduplicates and prices the session's transcripts. None when clanker-analytics cannot say."""
-    if not re.fullmatch(r"[0-9a-f-]+", session):
+def session_activity(session: str) -> dict | None:
+    """A lead session's turns and priced responses from clanker-analytics session-costs, for any harness it
+    reads: {"turns": [(time, text)], "costs": [(time, dollars)]}. None when clanker-analytics cannot say."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         raise UsageError(f"lead session {session!r} is not a session id")
     try:
         completed = subprocess.run(
@@ -141,14 +118,16 @@ def session_costs(session: str, since: datetime) -> list[tuple[datetime, float]]
         )
         if completed.returncode != 0:
             return None
-        responses = json.loads(completed.stdout)["responses"]
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError):
+        data = json.loads(completed.stdout)
+        turns = [(parse_time(t["timestamp"].replace("Z", "+00:00")), t["text"]) for t in data["turns"]]
+        costs = [
+            (parse_time(r["timestamp"].replace("Z", "+00:00")), float(r["api_cost_usd"]))
+            for r in data["responses"]
+            if r.get("api_cost_usd") is not None
+        ]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
-    return [
-        (parse_time(r["timestamp"].replace("Z", "+00:00")), float(r["api_cost_usd"]))
-        for r in responses
-        if r.get("api_cost_usd") is not None and parse_time(r["timestamp"].replace("Z", "+00:00")) >= since
-    ]
+    return {"turns": sorted(turns), "costs": costs}
 
 
 def lead_session(config, given: str | None = None) -> str | None:
@@ -158,21 +137,19 @@ def lead_session(config, given: str | None = None) -> str | None:
 
 
 def lead_cost_from_session(config, task, runs=(), session=None) -> float | None:
-    """The lead's turns charged to TASK. The lead session's Claude Code transcript gives each turn's trigger, and
-    clanker-analytics gives each response's cost. Unknown when either cannot be had."""
+    """The lead's turns charged to TASK, from the lead session's turns and priced responses as clanker-analytics
+    reads them. Unknown when there is no session or clanker-analytics cannot say."""
     session = lead_session(config, session)
     if not session:
         return None
-    transcripts = sorted(Path.home().glob(f".claude/projects/*/{session}*.jsonl"))
-    if not transcripts:
+    activity = ENV["session_activity"](session)
+    if activity is None:
         return None
-    costs = ENV["session_costs"](session, task.opened - timedelta(days=1))
-    if costs is None:
-        return None
+    since = task.opened - timedelta(days=1)  # leaves out responses a fork copied in with earlier times
+    costs = [(moment, cost) for moment, cost in activity["costs"] if moment >= since]
     started = task.started or {}
     names = [name for name in [*(started.get("units") or []), started.get("aop_run"), *runs] if name]
-    lines = transcripts[0].read_text().splitlines()
-    return charged_lead_cost(lead_turns(lines), costs, names, task.opened)
+    return charged_lead_cost(activity["turns"], costs, names, task.opened)
 
 
 ENV = {
@@ -180,7 +157,7 @@ ENV = {
     "aop_result": aop_result,
     "models": aop_models,
     "lead_cost": lead_cost_from_session,
-    "session_costs": session_costs,
+    "session_activity": session_activity,
 }
 
 
