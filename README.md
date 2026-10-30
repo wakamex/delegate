@@ -31,7 +31,7 @@ A `wait` answer names the busy resource or pool; try again later with `--since` 
 
 ## Limitations
 
-- Lead cost: the lead session, given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, is read for any harness: its turns, the user messages that started them, from `sch` ([search-clanker-history](https://github.com/wakamex/search-clanker-history)), and each response's cost from `clanker-analytics session-costs`; delegate only decides which turns are the task's. Unit and run names are matched as whole tokens. A message with no time, such as one delivered inside a tool result, starts no turn. Without a session, or when either tool cannot read it, the lead cost is unknown unless given as `close --lead-cost`.
+- Lead cost: the lead session, given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, is read for any harness: its turns, the user messages that started them, from `sch` ([search-clanker-history](https://github.com/wakamex/search-clanker-history) 0.3.1 or later, which finds one session's messages in seconds and leaves out lines that start no turn), and each response's cost from `clanker-analytics session-costs`; delegate only decides which turns are the task's. Unit and run names are matched as whole tokens. A message with no time, such as one delivered inside a tool result, starts no turn. Without a session, or when either tool cannot read it, the lead cost is unknown unless given as `close --lead-cost`.
 - A running task keeps its reservation until the lead closes it; a run that crashed is closed as `aborted`. `reap` only closes opens that never started.
 
 ## Development
