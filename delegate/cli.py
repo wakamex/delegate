@@ -424,10 +424,13 @@ def cmd_candidates(config, session, args, moment):
     for executor in config.executors.values():
         pools.setdefault(executor.agent, executor.pool)
     agents = set(args.agent or []) or (None if args.all_agents else set(pools))
+    families = [] if args.any_family else [re.compile(p) for p in config.candidate_families]
     by_agent: dict[str, list] = {}
     for entry in ENV["models"]():
         agent, model = entry.get("agent"), entry.get("model")
         if not agent or not model or (agent, model) in configured or (agents is not None and agent not in agents):
+            continue
+        if families and not any(p.search(model) for p in families):
             continue
         by_agent.setdefault(agent, []).append(
             {
@@ -554,6 +557,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("candidates", help="list models aop offers that are not configured as executors")
     s.add_argument("--agent", nargs="+", help="only these agents (default: the agents the project runs)")
     s.add_argument("--all-agents", action="store_true", help="every agent aop offers")
+    s.add_argument("--any-family", action="store_true", help="ignore the config's candidates.families patterns")
     s.add_argument("--limit", type=int, default=10, help="models per agent, priciest first (0 for all; default 10)")
     return top
 

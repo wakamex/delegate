@@ -120,6 +120,19 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(c["pool_room"] for c in result["candidates"]))
             _, everything = self.run_cli("candidates", "--all-agents")
             self.assertIn("agy", [c["agent"] for c in everything["candidates"]])
+        config = self.directory / "delegate.toml"
+        config.write_text(config.read_text() + '\n[candidates]\nfamilies = ["^(.*/)?gpt-7", "^swe-[2-9]"]\n')
+        models.append(
+            {"agent": "codex", "model": "gpt-6.5-luna", "input_per_million_usd": 0.1, "output_per_million_usd": 1.0}
+        )
+        with mock.patch.dict(cli.ENV, {"models": lambda: models}):
+            _, narrowed = self.run_cli("candidates")
+            self.assertEqual(
+                {c["agent"]: [m["model"] for m in c["models"]] for c in narrowed["candidates"]},
+                {"codex": ["gpt-7"], "devin": ["swe-3"]},
+            )
+            _, wide = self.run_cli("candidates", "--any-family")
+            self.assertIn("gpt-6.5-luna", [m["model"] for c in wide["candidates"] for m in c["models"]])
 
     def test_every_error_prints_json_and_exits_2(self):
         for args in (

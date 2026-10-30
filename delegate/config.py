@@ -1,5 +1,6 @@
 """A project's delegate.toml: what it declares about its kinds, executors and resources."""
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,7 @@ class Config:
     executors: dict[str, Executor]
     kinds: dict[str, Kind]
     dollars_per_point: dict[str, float]
+    candidate_families: list[str] = field(default_factory=list)
 
     @property
     def root(self) -> Path:
@@ -152,6 +154,7 @@ def load(path: Path) -> Config:
         "executors",
         "kinds",
         "pools",
+        "candidates",
     }
     if unknown := set(data) - known:
         raise ConfigError(f"unknown keys in {path.name}: {', '.join(sorted(unknown))}")
@@ -208,6 +211,14 @@ def load(path: Path) -> Config:
             bool(value.get("investigation", False)),
             {task: _number(score, f"{where}.references.{task}") for task, score in value.get("references", {}).items()},
         )
+    candidates = data.get("candidates", {})
+    _known(candidates, {"families"}, "candidates")
+    families = _strings(candidates.get("families", []), "candidates.families")
+    for pattern in families:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
     pools = {
         name: _number(value.get("dollars_per_point"), f"pools.{name}.dollars_per_point", 1e-12)
         for name, value in data.get("pools", {}).items()
@@ -225,6 +236,7 @@ def load(path: Path) -> Config:
         executors=executors,
         kinds=kinds,
         dollars_per_point=pools,
+        candidate_families=families,
     )
 
 

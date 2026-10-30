@@ -45,6 +45,8 @@ references = { "port-0012" = 30, "port-0031" = 60, "port-0044" = 90 }  # lead-sc
 investigation = false                    # true for a kind of bounded investigations
 ```
 
+`[candidates] families` is an optional list of regular expressions matched against model ids: `delegate candidates` lists only the unconfigured models that match one, so a lead sees the families worth trying rather than every model and effort aop offers. For example `"^(.*/)?gpt-6-luna"` matches codex's `gpt-6-luna` and opencode's `openai/gpt-6-luna` but not `gpt-5.6-luna`.
+
 `check`, `state`, `measure` and `classes` are required for every kind, and every table rejects keys it does not define, so a misspelt key is an error rather than a silent default.
 
 `[pools.NAME] dollars_per_point` converts a run's expected cost into the points the pool check reserves for it. `clanker-analytics pace` reports it, but takes minutes to run, too long to call on every selection, so the lead copies it into the config now and then. A pool without one is checked with usage-burn's default need. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
@@ -124,6 +126,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `delegate overturn ROOT --redo-cost N --reason .. [--found-by TASK]` | `overturn` | ROOT is the task whose commit introduced the overturned code |
 | `delegate suspend\|resume\|drop ACTOR KIND --reason ..` | the event | |
 | `delegate scorecard [KIND]` | nothing | prints each actor's cost per success or per unit, successes out of verdicts, score spread, integrity corrections, held minutes and open tasks |
+| `delegate candidates [--agent A..] [--all-agents] [--any-family] [--limit N]` | nothing | lists the models aop offers that the project has not configured as executors, for the agents it runs and the families its config names, priciest first, with each agent's pool room |
 | `delegate reap` | `close` with `aborted` | closes every open with no started event within the lease as aborted; every other command runs it first; a running task keeps its reservation until the lead closes it |
 
 Every command finds `delegate.toml` by walking up from the current directory, or takes `--config PATH`.
