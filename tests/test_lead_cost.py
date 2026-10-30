@@ -74,21 +74,30 @@ class SessionActivity(unittest.TestCase):
         with mock.patch.dict(cli.ENV, {"session_activity": lambda session: None}):
             self.assertIsNone(cli.lead_cost_from_session(config, self.task()))
 
-    def test_reads_turns_and_responses_from_session_costs_output(self):
-        output = {
-            "turns": [{"timestamp": "2026-10-30T12:20:00Z", "text": "Job job-port-7 succeeded"}],
+    def test_reads_turns_from_sch_and_costs_from_clanker_analytics(self):
+        costs = {
             "responses": [
                 {"timestamp": "2026-10-30T12:21:00Z", "api_cost_usd": 2.0},
                 {"timestamp": "2026-10-30T12:22:00Z", "api_cost_usd": None},
-            ],
+            ]
         }
-        completed = mock.Mock(returncode=0, stdout=json.dumps(output))
-        with mock.patch.object(cli.subprocess, "run", return_value=completed) as run:
+        messages = "\n".join(
+            json.dumps(m)
+            for m in [
+                {"time": "2026-10-30T08:20:00-04:00", "kind": "user", "text": "Job job-port-7 succeeded"},
+                {"time": None, "kind": "user", "text": "<system-reminder>"},  # no time: starts no turn
+            ]
+        )
+
+        def run(command, **kwargs):
+            outputs = {"clanker-analytics": json.dumps(costs), "sch": messages + "\n"}
+            return mock.Mock(returncode=0, stdout=outputs[command[0]])
+
+        with mock.patch.object(cli.subprocess, "run", side_effect=run) as called:
             activity = cli.session_activity("019a-codex-session")
-        self.assertEqual(run.call_args[0][0][:3], ["clanker-analytics", "session-costs", "019a-codex-session"])
+        self.assertEqual([c[0][0][0] for c in called.call_args_list], ["clanker-analytics", "sch"])
         self.assertEqual(activity, {"turns": [(at(20), "Job job-port-7 succeeded")], "costs": [(at(21), 2.0)]})
-        missing_turns = mock.Mock(returncode=0, stdout=json.dumps({"responses": []}))
-        with mock.patch.object(cli.subprocess, "run", return_value=missing_turns):
+        with mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="")):
             self.assertIsNone(cli.session_activity("0123abcd"))
 
     def test_a_session_id_must_be_one(self):

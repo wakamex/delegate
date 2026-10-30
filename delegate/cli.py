@@ -104,25 +104,31 @@ def charged_lead_cost(turns, costs, names, opened) -> float:
     return round(total, 4)
 
 
+def _run_json(command: list[str]):
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=SESSION_COST_SECONDS)
+    if completed.returncode != 0:
+        raise ValueError(f"{command[0]} exited {completed.returncode}")
+    return completed.stdout
+
+
 def session_activity(session: str) -> dict | None:
-    """A lead session's turns and priced responses from clanker-analytics session-costs, for any harness it
-    reads: {"turns": [(time, text)], "costs": [(time, dollars)]}. None when clanker-analytics cannot say."""
+    """A lead session's turns and priced responses, for any harness: {"turns": [(time, text)], "costs": [(time,
+    dollars)]}. The turns, the user messages that started them, come from sch (search-clanker-history), and each
+    response's cost from clanker-analytics session-costs. None when either cannot say."""
     if not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         raise UsageError(f"lead session {session!r} is not a session id")
     try:
-        completed = subprocess.run(
-            ["clanker-analytics", "session-costs", session, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=SESSION_COST_SECONDS,
-        )
-        if completed.returncode != 0:
-            return None
-        data = json.loads(completed.stdout)
-        turns = [(parse_time(t["timestamp"].replace("Z", "+00:00")), t["text"]) for t in data["turns"]]
+        responses = json.loads(_run_json(["clanker-analytics", "session-costs", session, "--json"]))["responses"]
+        messages = [
+            json.loads(line)
+            for line in _run_json(["sch", "-s", session, "-t", "user", "--json", "."]).splitlines()
+            if line.strip()
+        ]
+        # A message with no time cannot start a timed turn.
+        turns = [(parse_time(m["time"].replace("Z", "+00:00")), m["text"]) for m in messages if m.get("time")]
         costs = [
             (parse_time(r["timestamp"].replace("Z", "+00:00")), float(r["api_cost_usd"]))
-            for r in data["responses"]
+            for r in responses
             if r.get("api_cost_usd") is not None
         ]
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError, ValueError):

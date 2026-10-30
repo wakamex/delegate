@@ -11,7 +11,7 @@ A lead agent in a project can hand tasks to executor agents, or do them itself. 
 uv tool install git+https://github.com/wakamex/delegate
 ```
 
-It needs Python 3.12 or later and nothing beyond the standard library. It reads the run records of [aop (agent orchestration process)](https://github.com/wakamex/agent-orchestration-process) for executor costs, and takes the lead's per-response costs from `clanker-analytics session-costs` in [clanker-analytics](https://github.com/wakamex/clanker-analytics).
+It needs Python 3.12 or later and nothing beyond the standard library. It reads the run records of [aop (agent orchestration process)](https://github.com/wakamex/agent-orchestration-process) for executor costs, and takes the lead's turns from `sch` and its per-response costs from `clanker-analytics session-costs` in [clanker-analytics](https://github.com/wakamex/clanker-analytics).
 
 Pools are checked by a command taking `--check TARGET [--need N]` that prints one JSON line with the pool's windows and exits 0 when the run fits, 1 or 3 when it does not, and 2 on an error. `delegate` uses `usage-burn` on `PATH`, or the command named by `DELEGATE_USAGE_BURN`; without one it checks no pool, and `select` says so in its output.
 
@@ -31,7 +31,7 @@ A `wait` answer names the busy resource or pool; try again later with `--since` 
 
 ## Limitations
 
-- Lead cost: the lead session, given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, is read through `clanker-analytics session-costs`, which reports its turns and priced responses for every harness clanker-analytics parses; delegate only decides which turns are the task's. Unit and run names are matched as whole tokens. Without a session, or when clanker-analytics cannot read it, the lead cost is unknown unless given as `close --lead-cost`.
+- Lead cost: the lead session, given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, is read for any harness: its turns, the user messages that started them, from `sch` ([search-clanker-history](https://github.com/wakamex/search-clanker-history)), and each response's cost from `clanker-analytics session-costs`; delegate only decides which turns are the task's. Unit and run names are matched as whole tokens. A message with no time, such as one delivered inside a tool result, starts no turn. Without a session, or when either tool cannot read it, the lead cost is unknown unless given as `close --lead-cost`.
 - A running task keeps its reservation until the lead closes it; a run that crashed is closed as `aborted`. `reap` only closes opens that never started.
 
 ## Development
