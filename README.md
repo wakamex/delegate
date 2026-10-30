@@ -31,7 +31,7 @@ A `wait` answer names the busy resource or pool; try again later with `--since` 
 
 ## Limitations
 
-- Lead cost: the lead's turns come from its Claude Code transcript, by the session given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, and each response's cost from clanker-analytics. A lead in another harness has no transcript to read, so its lead cost is unknown unless given as `close --lead-cost`. Unit and run names are matched as whole tokens.
+- Lead cost: the lead's turns come from its Claude Code transcript, by the session given with `close --lead-session`, `DELEGATE_LEAD_SESSION` or `[lead] session`, and each response's cost from clanker-analytics. Both halves cover Claude Code only for now: delegate parses only Claude Code's transcript format to find the turns, and `session-costs` reads only Claude Code sessions, though clanker-analytics measures other harnesses too. A lead in Codex, agy or another harness gets an unknown lead cost unless it is given as `close --lead-cost`. Unit and run names are matched as whole tokens.
 - A running task keeps its reservation until the lead closes it; a run that crashed is closed as `aborted`. `reap` only closes opens that never started.
 
 ## Development
