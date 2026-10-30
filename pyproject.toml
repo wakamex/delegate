@@ -1,0 +1,19 @@
+[project]
+name = "delegate"
+version = "0.1.0"
+description = "Choose which agent takes each delegated task, and keep the ledger of how it went"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+delegate = "delegate.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120

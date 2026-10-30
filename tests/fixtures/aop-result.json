@@ -1,0 +1,32 @@
+{
+  "calculated_cost": {
+    "amount_usd": 2.5,
+    "currency": "USD",
+    "estimated_from": null,
+    "long_context_pricing": false,
+    "model": "gemini-4-argon-medium",
+    "priced_as": "google/gemini-4-argon",
+    "pricing_basis": "model-prices-0.0.5+models.dev@ba5289b8d6c5+synced@2026-10-29+data@f539b0924a73",
+    "pricing_period": null,
+    "pricing_retrieved_at": null,
+    "pricing_source": "https://github.com/sst/models.dev/commit/0da444719383",
+    "pricing_version": "model-prices-0.0.5",
+    "removed_suffix": "-medium"
+  },
+  "duration_seconds": 600.0,
+  "finished_at": "2026-10-30T10:10:00+00:00",
+  "model": "gemini-4-argon-medium",
+  "provider": "agy",
+  "run_id": "11111111-2222-3333-4444-555555555555",
+  "started_at": "2026-10-30T10:00:00+00:00",
+  "status": "succeeded",
+  "timed_out": false,
+  "usage": {
+    "cache_write_1h_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "cached_input_tokens": 900000,
+    "input_tokens": 1000000,
+    "output_tokens": 20000,
+    "reasoning_output_tokens": 0
+  }
+}

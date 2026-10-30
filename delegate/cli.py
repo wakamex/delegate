@@ -1,0 +1,580 @@
+"""The delegate command: every subcommand prints one JSON line."""
+
+import argparse
+import hashlib
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from delegate import policy
+from delegate.config import ConfigError, find_config, load
+from delegate.ledger import Ledger, LedgerError, parse_time
+from delegate.policy import LEAD, Env, SelectError
+
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "delegate"
+AOP_RESULTS = STATE / "aop" / "results"
+# The pool check: a command taking --check TARGET [--need N] that prints one JSON line and exits 0 for room,
+# 1 or 3 for none and 2 for an error, such as usage-burn. Without one, pools are not checked.
+USAGE_BURN = os.environ.get("DELEGATE_USAGE_BURN") or shutil.which("usage-burn")
+SESSION_COST_SECONDS = 60
+CATCH_UP_HOURS = 24
+
+
+class UsageError(Exception):
+    """A command given arguments that do not fit the task or the config."""
+
+
+def now() -> datetime:
+    """The current time, or DELEGATE_NOW for tests."""
+    fixed = os.environ.get("DELEGATE_NOW")
+    return parse_time(fixed) if fixed else datetime.now(UTC)
+
+
+# ---- what select and close need from outside the ledger ------------------------------------------
+
+
+def pool_check(target: str, need: float | None, need_short: float | None) -> dict:
+    """Room on a quota pool from the pool check: exit 0 room, 1 or 3 none, 2 an error."""
+    if not USAGE_BURN:
+        return {"room": True, "catch_up": False, "state": "unchecked"}
+    command = [USAGE_BURN, "--check", target]
+    if need is not None:
+        command += ["--need", f"{need:.4f}"]
+    if need_short is not None:
+        command += ["--need-short", f"{need_short:.4f}"]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UsageError(f"usage-burn could not check {target}: {exc}") from exc
+    if completed.returncode == 2:
+        raise UsageError(f"usage-burn could not check {target}: {completed.stdout.strip() or completed.stderr.strip()}")
+    try:
+        result = json.loads(completed.stdout.splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise UsageError(f"usage-burn gave no JSON for {target}") from exc
+    moment = now()
+    catch_up = False
+    for window in result.get("windows") or []:
+        reset = window.get("resets_at")
+        if window.get("paced") and reset and window.get("pace") is not None and window["pace"] < 1:
+            if parse_time(reset) - moment <= timedelta(hours=CATCH_UP_HOURS):
+                catch_up = True
+    return {"room": completed.returncode == 0, "catch_up": catch_up, "state": result.get("state")}
+
+
+def aop_models() -> list[dict]:
+    """The models aop can run, from aop models --json."""
+    try:
+        completed = subprocess.run(["aop", "models", "--json"], capture_output=True, text=True, timeout=120)
+        return json.loads(completed.stdout).get("models") or []
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        raise UsageError(f"aop models gave no model list: {exc}") from exc
+
+
+def aop_result(run_id: str) -> dict | None:
+    path = AOP_RESULTS / f"{run_id}.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def lead_turns(transcript_lines) -> list[tuple[datetime, str]]:
+    """The lead's turns in a Claude Code transcript.
+
+    Each is the start time and text of a user message that is not a tool result.
+    """
+    turns = []
+    for line in transcript_lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "user" or entry.get("isMeta") or not entry.get("timestamp"):
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            if any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content):
+                continue
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if isinstance(content, str) and content.strip():
+            turns.append((parse_time(entry["timestamp"].replace("Z", "+00:00")), content))
+    return sorted(turns, key=lambda turn: turn[0])
+
+
+def charged_lead_cost(turns, costs, names, opened) -> float:
+    """Sum the cost of the turns charged to a task: each turn whose triggering message names one of NAMES (its
+    agent-job units or aop runs), and the turn in which the task was opened, which holds its brief. Every cost row
+    belongs to the latest turn started at or before it; other turns, including the user's own, charge no task."""
+    starts = [start for start, _ in turns]
+    # A name matches only as a whole token, so a unit job-ab does not match a message about job-ab2.
+    patterns = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in names if name]
+    charged = {i for i, (_, text) in enumerate(turns) if any(p.search(text) for p in patterns)}
+    opening = max((i for i, start in enumerate(starts) if start <= opened), default=None)
+    if opening is not None:
+        charged.add(opening)
+    total = 0.0
+    for moment, cost in costs:
+        i = max((j for j, start in enumerate(starts) if start <= moment), default=None)
+        if i in charged:
+            total += cost
+    return round(total, 4)
+
+
+def session_costs(session: str, since: datetime) -> list[tuple[datetime, float]] | None:
+    """Each response's API-equivalent cost in a Claude Code session, from clanker-analytics session-costs,
+    which parses, deduplicates and prices the session's transcripts. None when clanker-analytics cannot say."""
+    if not re.fullmatch(r"[0-9a-f-]+", session):
+        raise UsageError(f"lead session {session!r} is not a session id")
+    try:
+        completed = subprocess.run(
+            ["clanker-analytics", "session-costs", session, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=SESSION_COST_SECONDS,
+        )
+        if completed.returncode != 0:
+            return None
+        responses = json.loads(completed.stdout)["responses"]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    return [
+        (parse_time(r["timestamp"].replace("Z", "+00:00")), float(r["api_cost_usd"]))
+        for r in responses
+        if r.get("api_cost_usd") is not None and parse_time(r["timestamp"].replace("Z", "+00:00")) >= since
+    ]
+
+
+def lead_session(config, given: str | None = None) -> str | None:
+    """The lead's session: --lead-session, else DELEGATE_LEAD_SESSION, else the config's. A lead's session id changes
+    whenever it starts afresh, so the flag or the variable is the usual source and the config only a default."""
+    return given or os.environ.get("DELEGATE_LEAD_SESSION") or config.lead_session
+
+
+def lead_cost_from_session(config, task, runs=(), session=None) -> float | None:
+    """The lead's turns charged to TASK. The lead session's Claude Code transcript gives each turn's trigger, and
+    clanker-analytics gives each response's cost. Unknown when either cannot be had."""
+    session = lead_session(config, session)
+    if not session:
+        return None
+    transcripts = sorted(Path.home().glob(f".claude/projects/*/{session}*.jsonl"))
+    if not transcripts:
+        return None
+    costs = ENV["session_costs"](session, task.opened - timedelta(days=1))
+    if costs is None:
+        return None
+    started = task.started or {}
+    names = [name for name in [*(started.get("units") or []), started.get("aop_run"), *runs] if name]
+    lines = transcripts[0].read_text().splitlines()
+    return charged_lead_cost(lead_turns(lines), costs, names, task.opened)
+
+
+ENV = {
+    "pool": pool_check,
+    "aop_result": aop_result,
+    "models": aop_models,
+    "lead_cost": lead_cost_from_session,
+    "session_costs": session_costs,
+}
+
+
+# ---- reaping -------------------------------------------------------------------------------------
+
+
+def reap(config, session, moment: datetime) -> list[dict]:
+    """Close as aborted every open with no started event within the lease."""
+    written = []
+    lease = timedelta(minutes=config.lease_minutes)
+    for task in list(session.state.tasks.values()):
+        if task.holding and task.started is None and moment - task.opened > lease:
+            written.append(
+                session.append(
+                    {
+                        "event": "close",
+                        "at": moment.isoformat(),
+                        "task": task.id,
+                        "outcome": "aborted",
+                        "reason": "no started event within the lease",
+                    }
+                )
+            )
+    return written
+
+
+def _task(session, task_id):
+    task = session.state.tasks.get(task_id)
+    if task is None:
+        raise UsageError(f"unknown task {task_id!r}")
+    return task
+
+
+def _env(config) -> Env:
+    return Env(pool=ENV["pool"], rng=random.Random())
+
+
+def cmd_select(config, session, args, moment):
+    resources = args.resources.split(",") if args.resources else None
+    since = parse_time(args.since) if args.since else None
+    result, events = policy.select(
+        config,
+        session.state,
+        args.kind,
+        args.cls,
+        moment,
+        _env(config),
+        resources,
+        args.token_cap,
+        args.retry,
+        args.admit,
+        since,
+    )
+    for event in events:
+        session.append(event)
+    return result
+
+
+def cmd_started(config, session, args, moment):
+    task = _task(session, args.task)
+    if task.close:
+        raise UsageError(f"{task.id} is already closed")
+    if not (args.aop_run or args.unit):
+        raise UsageError("started needs --aop-run or --unit")
+    event = {"event": "started", "at": moment.isoformat(), "task": task.id}
+    if args.aop_run:
+        event["aop_run"] = args.aop_run
+    if args.unit:
+        event["units"] = args.unit
+    return session.append(event)
+
+
+def _evidence(values):
+    out = []
+    for value in values or []:
+        path = Path(value)
+        if path.is_file():
+            out.append({"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        else:
+            out.append(value)
+    return out
+
+
+def _score(kind, args, required):
+    if kind.measure != "lead-score":
+        if args.score is not None:
+            raise UsageError(f"kind {kind.name} does not use a lead score")
+        return None
+    if args.score is None:
+        if required:
+            raise UsageError(f"kind {kind.name} needs --score and --score-reason for a successful task")
+        return None
+    if not 0 <= args.score <= 100 or not args.score_reason:
+        raise UsageError("--score is from 0 to 100 and needs --score-reason")
+    return {"value": args.score, "reason": args.score_reason}
+
+
+def _yield(kind, args, required):
+    if kind.measure != "yield":
+        if args.yield_ is not None:
+            raise UsageError(f"kind {kind.name} does not count yield")
+        return None
+    if args.yield_ is None and required:
+        raise UsageError(f"kind {kind.name} needs --yield, counted by its reference check, for a successful task")
+    if args.yield_ is not None and args.yield_ < 0:
+        raise UsageError("--yield must not be negative")
+    return args.yield_
+
+
+def _correction(args, outcome, default_caught=None):
+    if outcome != "corrected":
+        if args.caught_by or args.defect:
+            raise UsageError("--caught-by and --defect are for corrected outcomes")
+        return {}
+    caught = args.caught_by or default_caught
+    if not caught or not args.defect:
+        raise UsageError("a correction needs --caught-by and --defect")
+    return {"caught_by": caught, "defect": args.defect}
+
+
+def cmd_close(config, session, args, moment):
+    task = _task(session, args.task)
+    kind = config.kinds[task.kind]
+    if task.close:
+        raise UsageError(f"{task.id} is already closed")
+    outcome = args.outcome
+    if kind.check == "deferred" and outcome in ("held", "steered"):
+        raise UsageError("a deferred kind closes as awaiting; held comes from its verdict")
+    if kind.check != "deferred" and outcome == "awaiting":
+        raise UsageError("only a deferred kind closes as awaiting")
+    success = outcome in ("held", "steered")
+    event = {
+        "event": "close",
+        "at": moment.isoformat(),
+        "task": task.id,
+        "outcome": outcome,
+        **_correction(args, outcome),
+    }
+    score, yielded = _score(kind, args, success), _yield(kind, args, success)
+    if score:
+        event["score"] = score
+    if yielded is not None:
+        event["yield"] = yielded
+    if kind.investigation and success:
+        if not args.evidence or args.falsifier_checked is None:
+            raise UsageError("an investigation needs --evidence and --falsifier-checked")
+    runs = [r for r in [(task.started or {}).get("aop_run"), *(args.aop_run or [])] if r]
+    actor_cost, run_minutes = args.actor_cost, args.run_minutes
+    if task.actor != LEAD and runs and actor_cost is None:
+        results = [ENV["aop_result"](r) for r in runs]
+        if all(results):
+            actor_cost = sum(float((r.get("calculated_cost") or {}).get("amount_usd") or 0) for r in results)
+            if run_minutes is None:
+                run_minutes = sum(float(r.get("duration_seconds") or 0) for r in results) / 60
+    lead_cost = (
+        args.lead_cost if args.lead_cost is not None else ENV["lead_cost"](config, task, runs, args.lead_session)
+    )
+    held = {name: round((moment - task.opened).total_seconds() / 60, 1) for name in (task.open.get("resources") or {})}
+    event.update(
+        {
+            "cost": {"actor": actor_cost, "lead": None if task.actor == LEAD else lead_cost},
+            "resumes": args.resumes,
+            "brief_error": args.brief_error,
+            "minutes": {"run": run_minutes, "held": held},
+            "aop_runs": runs,
+            "commits": args.commit or [],
+            "claims": args.claim or [],
+            "evidence": _evidence(args.evidence),
+            "report": args.report,
+        }
+    )
+    if kind.investigation:
+        event["falsifier_checked"] = args.falsifier_checked
+    return session.append(event)
+
+
+def cmd_verdict(config, session, args, moment):
+    task = _task(session, args.task)
+    kind = config.kinds[task.kind]
+    if kind.check != "deferred" or not task.close or task.close["outcome"] != "awaiting":
+        raise UsageError(f"{task.id} is not a deferred task awaiting its verdict")
+    if task.verdict:
+        raise UsageError(f"{task.id} already has its verdict; use overturn")
+    success = args.outcome == "held"
+    event = {
+        "event": "verdict",
+        "at": moment.isoformat(),
+        "task": task.id,
+        "outcome": args.outcome,
+        **_correction(args, args.outcome, "deferred-check"),
+        "evidence": _evidence(args.evidence),
+        "unresolved": args.unresolved or [],
+    }
+    if not event["evidence"]:
+        raise UsageError("a verdict needs --evidence naming the run of the check that decided it")
+    score, yielded = _score(kind, args, success), _yield(kind, args, success)
+    if score:
+        event["score"] = score
+    if yielded is not None:
+        event["yield"] = yielded
+    return session.append(event)
+
+
+def cmd_overturn(config, session, args, moment):
+    root = _task(session, args.root)
+    if root.outcome not in ("held", "steered"):
+        raise UsageError(f"{root.id} is not a standing success to overturn")
+    if args.found_by:
+        _task(session, args.found_by)
+    return session.append(
+        {
+            "event": "overturn",
+            "at": moment.isoformat(),
+            "root": root.id,
+            "redo_cost": args.redo_cost,
+            "reason": args.reason,
+            "found_by": args.found_by,
+        }
+    )
+
+
+def cmd_actor_event(config, session, args, moment):
+    if args.kind not in config.kinds:
+        raise UsageError(f"unknown kind {args.kind!r}")
+    if args.actor not in config.executors:
+        raise UsageError(f"unknown executor {args.actor!r}")
+    return session.append(
+        {"event": args.command, "at": moment.isoformat(), "actor": args.actor, "kind": args.kind, "reason": args.reason}
+    )
+
+
+def cmd_scorecard(config, session, args, moment):
+    return {"scorecard": policy.scorecard(config, session.state, _env(config), args.kind)}
+
+
+def cmd_candidates(config, session, args, moment):
+    """Models aop offers that the project has not configured as executors, with price and pool room."""
+    configured = {(e.agent, e.model) for e in config.executors.values()}
+    configured |= {(e.agent, f"{e.model}-{e.effort}") for e in config.executors.values() if e.effort}
+    pools = {}
+    for executor in config.executors.values():
+        pools.setdefault(executor.agent, executor.pool)
+    agents = set(args.agent or []) or (None if args.all_agents else set(pools))
+    by_agent: dict[str, list] = {}
+    for entry in ENV["models"]():
+        agent, model = entry.get("agent"), entry.get("model")
+        if not agent or not model or (agent, model) in configured or (agents is not None and agent not in agents):
+            continue
+        by_agent.setdefault(agent, []).append(
+            {
+                "model": model,
+                "input_per_million_usd": entry.get("input_per_million_usd"),
+                "output_per_million_usd": entry.get("output_per_million_usd"),
+                "availability": entry.get("availability"),
+            }
+        )
+    result = []
+    for agent in sorted(by_agent):
+        models = sorted(
+            by_agent[agent],
+            key=lambda m: (m["output_per_million_usd"] is None, -(m["output_per_million_usd"] or 0), m["model"]),
+        )
+        pool = pools.get(agent)
+        room = ENV["pool"](pool, None, None) if pool else None
+        result.append(
+            {
+                "agent": agent,
+                "pool": pool,
+                "pool_room": None if room is None else room["room"],
+                "models": models[: args.limit] if args.limit else models,
+                "more": max(0, len(models) - args.limit) if args.limit else 0,
+            }
+        )
+    return {"candidates": result}
+
+
+def cmd_reap(config, session, args, moment):
+    return {"reaped": []}  # reap runs before every command; its events are reported by main
+
+
+COMMANDS = {
+    "select": cmd_select,
+    "started": cmd_started,
+    "close": cmd_close,
+    "verdict": cmd_verdict,
+    "overturn": cmd_overturn,
+    "suspend": cmd_actor_event,
+    "resume": cmd_actor_event,
+    "drop": cmd_actor_event,
+    "scorecard": cmd_scorecard,
+    "reap": cmd_reap,
+    "candidates": cmd_candidates,
+}
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise UsageError(message)
+
+
+def parser() -> argparse.ArgumentParser:
+    top = Parser(prog="delegate", description="Choose which agent takes each delegated task, and keep its ledger.")
+    top.add_argument(
+        "--config", type=Path, help="delegate.toml (default: the nearest at or above the current directory)"
+    )
+    sub = top.add_subparsers(dest="command", required=True, parser_class=Parser)
+
+    s = sub.add_parser("select", help="choose delegate, admit, wait or lead, and open the task")
+    s.add_argument("kind")
+    s.add_argument("cls", metavar="class")
+    s.add_argument("--resources", help="R[=AMOUNT],... (default: the kind's)")
+    s.add_argument("--token-cap", type=float)
+    s.add_argument("--retry", metavar="TASK")
+    s.add_argument("--admit", metavar="EXECUTOR")
+    s.add_argument("--since", help="when this task started waiting, from a previous wait answer")
+
+    s = sub.add_parser("started", help="record what holds the task's reservation")
+    s.add_argument("task")
+    s.add_argument("--aop-run")
+    s.add_argument("--unit", nargs="+")
+
+    def judged(s, outcomes):
+        s.add_argument("task")
+        s.add_argument("--outcome", required=True, choices=outcomes)
+        s.add_argument("--caught-by", choices=("gate", "review", "deferred-check"))
+        s.add_argument("--defect", choices=("integrity", "scope", "failed-gate"))
+        s.add_argument("--score", type=float)
+        s.add_argument("--score-reason")
+        s.add_argument("--yield", dest="yield_", type=float)
+        s.add_argument("--evidence", nargs="+", help="artifact paths, hashed, or free references")
+
+    s = sub.add_parser("close", help="close a task once its result has landed or been discarded")
+    judged(s, ("held", "steered", "corrected", "aborted", "awaiting"))
+    s.add_argument("--brief-error")
+    s.add_argument("--resumes", type=int, default=0)
+    s.add_argument("--actor-cost", type=float, help="the actor's cost, if not from aop's records")
+    s.add_argument("--lead-cost", type=float)
+    s.add_argument("--lead-session", help="the lead's session id (default: DELEGATE_LEAD_SESSION, then the config)")
+    s.add_argument("--run-minutes", type=float)
+    s.add_argument("--aop-run", nargs="+", help="further aop runs of the task")
+    s.add_argument("--commit", nargs="+")
+    s.add_argument("--claim", nargs="+")
+    s.add_argument("--report")
+    s.add_argument(
+        "--falsifier-checked",
+        type=lambda v: {"true": True, "false": False}[v.lower()],
+        help="investigations: true or false",
+    )
+
+    s = sub.add_parser("verdict", help="record a deferred task's final verdict")
+    judged(s, ("held", "corrected"))
+    s.add_argument("--unresolved", nargs="+")
+
+    s = sub.add_parser("overturn", help="overturn a standing result")
+    s.add_argument("root", help="the task whose commit introduced the overturned code")
+    s.add_argument("--redo-cost", type=float, required=True)
+    s.add_argument("--reason", required=True)
+    s.add_argument("--found-by", metavar="TASK")
+
+    for name in ("suspend", "resume", "drop"):
+        s = sub.add_parser(name, help=f"{name} an executor in a kind")
+        s.add_argument("actor")
+        s.add_argument("kind")
+        s.add_argument("--reason", required=True)
+
+    s = sub.add_parser("scorecard", help="print each actor's record per kind")
+    s.add_argument("kind", nargs="?")
+
+    sub.add_parser("reap", help="close opens that never started within the lease")
+
+    s = sub.add_parser("candidates", help="list models aop offers that are not configured as executors")
+    s.add_argument("--agent", nargs="+", help="only these agents (default: the agents the project runs)")
+    s.add_argument("--all-agents", action="store_true", help="every agent aop offers")
+    s.add_argument("--limit", type=int, default=10, help="models per agent, priciest first (0 for all; default 10)")
+    return top
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = parser().parse_args(argv)
+        config = load(args.config or find_config(Path.cwd()))
+        moment = now()
+        with Ledger(config.ledger).locked() as session:
+            reaped = reap(config, session, moment)
+            result = COMMANDS[args.command](config, session, args, moment)
+        if reaped:
+            result = {**result, "reaped": [{"task": e["task"], "event": e["event"]} for e in reaped]}
+        if args.command == "select" and not USAGE_BURN:
+            result = {**result, "pool_check": "skipped: no usage-burn on PATH and no DELEGATE_USAGE_BURN"}
+        print(json.dumps(result, default=str))
+        return 0
+    except (UsageError, ConfigError, LedgerError, SelectError) as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 2
+    except Exception as exc:  # a bug must still print JSON, never pass for a choice
+        print(json.dumps({"error": f"internal error: {exc!r}"}))
+        return 2

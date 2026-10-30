@@ -1,0 +1,166 @@
+# Agent delegation workflow
+
+Version 8, adopted on 2026-10-30 by the lead agents of three projects: [concord](https://github.com/wakamex/concord), a matching-decompilation project; a game-simulator port; and a reverse-engineering project. It draws on concord's executor scorecard, the simulator port's per-kind trust-against-cost view (which survives here as the scorecard), a trading-research project's route bandit, and the reverse-engineering project's executor calibration.
+
+A lead agent in a project can hand well-defined tasks to executor agents, models run through [aop](https://github.com/wakamex/agent-orchestration-process), or do them itself. This document is how a lead decides whether to delegate a task, which executor gets it, how the outcome and cost are recorded, and how quota is kept from being overspent or wasted.
+
+## Goals
+
+- A task is delegated only when an executor is expected to finish it well for less total cost than the lead doing it, counting the lead's time on the brief and on checking the result.
+- Each delegated task goes to an executor with a low expected cost per successful task among those trusted with it, and executors keep being tried where trying them is cheap, so a ranking built on a few tasks does not harden into habit. concord sent 34 capability tasks in a row to Codex Luna, and 65 tasks over 36 hours to two Codex models, while free executors sat idle.
+- No subscription is spent far ahead of its reset, and allowance about to expire unused gets used.
+- Each project ranks executors on its own tasks only.
+
+## What this covers
+
+Tasks whose outcome the lead or an authoritative check judges: a port, a tool, a fix, a search, a reconstruction. It does not cover second opinions, sealed reviews, consultations with another session or a chat bot's replies; those choose their model as their caller likes and are not gated.
+
+## Terms
+
+- Actor: who does a task, an executor (agent, model and effort) or the lead. A new model or effort is a new executor.
+- Task: one brief and every run that serves it, the first run and its resumes in one session. A hard task finished through several resumes is one task, since the session's context is what makes each resume cheap. A task that fails and is redone by another actor is a retry: a new task naming the first, never given to the actor that failed it.
+- Kind: what the task is. Each project names its own few (concord: capability, diagnosis, search, rule; the simulator port: port, tool, confirmation; the reverse-engineering project: for example operation reconstruction, error-variant location, post-state difference).
+- Class: how hard the task is within its kind, from a short ordered list the project keeps, for example bounded change, first reading of a new area, cross-cutting redesign.
+- How a kind's results are checked, which decides how much exploring it can afford:
+  - gated: a mechanical check compares the result with a reference the actor did not produce, and catches failures before they land. Examples: concord's whole-build gate (`concord scores --base`, which fails when any function gets worse or matched data is lost), an emulator run of the original bytes, a decompile index, a fresh-build corpus. Tests the actor wrote, or that only check internal consistency, do not make a kind gated: in the simulator port, one tool passed all 30 unit tests while its coverage figure counted inherited method-table slots (89% covered against 3.6% after the fix), and another passed every emulator vector on a pilot that had sampled 19 constant getters out of 20. Tools that compute a metric, choose a sample or report a figure are reviewed;
+  - reviewed: the lead must re-derive the result to know whether it holds, as for the simulator port's ports, which push to `main` and share one live client;
+  - deferred: only an authoritative check that can come many tasks later shows whether the result holds, as for the reverse-engineering project's reconstructions, judged against a differential of the original system's state. A claim there, from the project's own earlier work, passed review and stood for weeks until a later comparison showed it wrong, so review misses such errors whoever wrote them.
+- Outcome of a task:
+  - held: the result stood as delivered, or passed the kind's authoritative check;
+  - steered: it stood after resumes that only continued past a stop the actor declared, either to finish work it said it left incomplete or with a decision it stopped to ask for. When the lead supplies a decision, the missing decision is a brief error against the lead (in the simulator port, one executor stopped on a design question it named, a value it needed to read lacking a clock in the game state; the lead decided and the executor carried out the refactor);
+  - corrected: the result did not stand, including when a resume had to supply the cause of a defect in delivered work (one port left eight later retries with wrong path flags, and the resume pointed at the flag transitions that showed it). A correction records two things:
+    - caught by: the gate, the lead's review, or the deferred check;
+    - defect: integrity (a fitted rule, a test asserting a known-wrong value, an out-of-scope change, a misreported number, a missed critical reject), scope (a part the brief asked for was wrong or missing and the actor did not say so), or failed gate (rejected by the gate with no further diagnosis);
+  - a lead edit corrects a result when it was needed for the result to work as delivered: it changes behaviour, a test's assertion, a mechanic's value or tag, or fixes a build, an import, a type error or a memory blowup. A rebase, a lint fix or a wording change does not;
+  - aborted: the run failed for a reason outside the actor, such as a full disk, a lost host, a live client that exited or a provider at capacity. It counts as neither success nor failure;
+  - running: launched and not yet closed. A running task reserves its shared resources and its expected need against its executor's pool;
+  - awaiting verdict: delivered in a deferred kind and closed, without its final verdict yet. It reserves nothing.
+- Outcome measure: how a kind judges how much a successful task was worth, one per kind, set in the project's config:
+  - pass or fail, the default: held and steered tasks count as one success, corrected ones as none;
+  - yield: a count of what the task produced, allowed only when a reference check counts the unit, not the actor or the lead, and units are comparable across tasks, such as concord's newly exact functions or cases matched on the reverse-engineering project's authoritative check. A corrected task yields zero. It does not fit the simulator port's ports, where the unit depends on how finely mechanics are tagged and some of the most valuable tasks yield nothing countable: one stopped correctly on missing state, one measured that 11,446 of 12,511 player orders depend on one unresolved check, and one overturned a wrong premise;
+  - lead score: the lead's one overall judgment of the result, from 0 to 100, with a one-line reason, counted as that fraction of a success. It judges the result alone: integrity stays a separate field, and the lead gives the score before seeing the task's cost. Each kind keeps a few reference tasks from its ledger as fixed points, for the simulator port's ports one at about 30 (a correct but narrow result: a boundary confirmed, no code changed), one at about 60 (a bounded port) and two at about 90 (a general mechanism changed or a premise overturned), so scores do not drift with the most recent task. There are no component rubrics: the simulator port's earlier grades summed results, reliability, efficiency and report, and that sum is what put every Claude model between 82 and 86. A kind may use the lead score alongside a gate, where the gate must pass and the score says how good the passing result was.
+
+  In a deferred kind, yield and the lead score are given with the final verdict, not at close; until then the task stays out of the statistics, and an overturn sets them to zero along with the outcome, since a score given at close is a review verdict, the kind that let the reverse-engineering project's wrong claim stand for weeks.
+- Cost: what a task cost in total:
+  - actor cost: for an executor, the API-equivalent cost of every aop run of the task from aop's records, which includes the cache rereads that waiting on long builds causes; for the lead, its turns on the task;
+  - lead cost: the cost of the lead turns that served the task, each response priced by [clanker-analytics](https://github.com/wakamex/clanker-analytics). Each turn is tagged with the task that triggered it: a turn started by a task's completion message charges that task, the turn that opened the task charges it for the brief, verification done in a later session charges the task it verifies, and turns answering the user charge no task. This stays correct with several tasks running at once. A failed task's record carries the lead's cost of finding the failure;
+  - redo cost: when a result is overturned later, the cost of redoing what was built on it, recorded on the overturn and charged to the task named as its root cause.
+- Cost per success of an actor in a kind and class: its expected cost per task divided by its success rate in the kind. With a lead score, a task scored s adds s to the actor's successes and 1 minus s to its failures. With yield, the success rate is multiplied by the actor's shrunk mean yield per successful task, so the figure becomes cost per unit. Expected cost per task is the sum of three shrunk means, of actor cost, lead cost and redo cost (when the actor is the lead, its work is its actor cost and no separate lead cost is added), each (n times its mean plus one prior task) divided by (n plus 1) over the actor's n tasks with that cost recorded, in the task's class once that class has three verdicts and over the kind before that. The actor-cost prior is the executor's own mean cost over all its tasks, so a $0.20 executor is not pulled toward $10 incumbents, else the kind's mean actor cost; the lead-cost prior is the kind's mean lead cost per task, and the redo-cost prior is the kind's mean redo cost per task. An actor with tasks but no costed one, such as concord's imported rows or a warm-up still running, takes the priors, and one heavy early task is damped instead of deciding its record: one run in the simulator port cost $26.93, about four times its executor's typical port. Success rates stay at the kind level, so small samples are not cut into cells of one, while cost follows class, since that executor's redesigns cost several times its bounded ports. With none held it is unbounded. Dividing mean cost by success rate is the cost of reaching one success, retries included, so a cheap actor that succeeds half the time is genuinely cheap once each failure carries the lead's cost of catching it.
+- Harness capabilities: what an executor's harness can enforce, listed per executor: sealed inputs with hash-pinned snapshots, enforced no-web (Antigravity cannot enforce aop's `--no-web`), no write authority over the project's cumulative model, access to a VM or tool a kind needs.
+
+## Delegation state of each kind
+
+Each kind is on or off, with the reason recorded. Each class of a kind takes the kind's state unless the project's config sets it otherwise: a class can be lead only in an on kind, as the simulator port's redesign class is (its redesigns moved only once the lead made the design decisions), or on in an off kind, where bounded tasks of that class can be briefed.
+
+- Off is the default for a kind whose results are deferred or whose brief would take most of the work: in the reverse-engineering project, finding the right layer of the code was most of one task. A kind turns on when an executor is admitted to it, and turns off again when every admitted executor has been dropped from it by the rule below.
+- An executor is admitted to a kind:
+  - in a gated kind, by default, since the gate catches its failures;
+  - in a reviewed kind, by holding or steering two of its first three lowest-class tasks the lead picks. The trial stops as failed at two failures, and a failed candidate tries again only by a recorded lead decision. The helper tracks the trial;
+  - in a deferred kind, by passing a calibration the project defines in advance (blinded cases, a local answer key and a pass threshold declared before the run) and then holding one bounded live task with the tools the kind uses, judged by its authoritative check. The reverse-engineering project ran one: Gemini 3.8 Flash Low scored 42 of 48, missed 1 of 8 critical rejects and left out a required citation, so it was not admitted and that kind stayed off. That calibration was offline questions, which is why the live task is also needed. Building and maintaining a calibration is lead work recorded against the kind's admission.
+- An admitted executor is dropped from a kind when its success rate over its tasks after admission (the admission trials left out) is probably below one half, that is when Beta(a, b), with a one plus its held and steered tasks and b one plus its corrected ones, puts more than 90% of its mass below 0.5. That drops an executor at 0 of 3 (Beta(1, 4), 94% below 0.5), as it dropped Codex Luna from the simulator port's ports, and a cheap executor that never succeeds however little it costs. Once it and the lead each have five verdicts in the kind, it is also dropped when its cost per success is more than 95% likely to exceed the lead's, drawing both success rates the same way: the lead doing the task is then the cheaper choice. 95% rather than 90%, because the rule is checked after every verdict, and at 90% an executor as good as the lead would be dropped about a third of the time over 30 tasks. An executor is never dropped for costing more than another executor. The draw already sends most tasks to the cheaper one, and concord's first use of an earlier version showed the harm: compared against the cheapest other actor, it dropped Devin, which had held 12 of 12 diagnoses at about $2 each, along with Sol and Terra, in favour of Luna at $0.17, whose Codex pool was at 94% of its week. In a deferred kind both rules count final verdicts only, so an overturn of lead work lowers the lead's baseline too. The kind's off rule is the lead comparison applied to every admitted executor. A dropped executor returns only as a new model or effort, or by a lead decision recorded with its reason. Drops, suspensions and resumptions are ledger events, so all state that changes lives in the one ledger and the config holds only what the project declares.
+- In a reviewed or deferred kind, one confirmed integrity correction suspends the executor from the kind until the lead reviews its record and records a decision to drop or resume it. Integrity slips come in runs and are built on: one executor's in the simulator port were a test pinning a known-wrong value, then an out-of-scope rule change and a fitted collision rule, and a suspension after the first would have stopped the next two. In a gated kind the gate catches such defects, so an integrity correction there is one failure among many. The lead's own integrity corrections are recorded the same way, so its baseline reflects them.
+- The lead's own work is always recorded, with the lead as actor and real outcomes, in every kind, so an overturn of lead work has a task to land on and the baseline exists the day an executor is admitted. The simulator port's record has two lead errors that need such records: a result called a build difference before it was checked, which a later task overturned, and a brief that asked for a mechanic to be confirmed while its scenes still differed. A project's config sets the grain: one record per task, or, as the reverse-engineering project does, one per committed slice, carrying its claim ids.
+
+## The workflow
+
+### 1. Write a self-contained brief
+
+The brief states the goal, the checkable rules the result must meet, how to verify it, a stop condition, and a cap on tokens that ends the run. For a large change it states the design decision and a narrow stop; an executor left to choose the design is where steering resumes and their cost go. Any sensitive material the task needs is authorized for the executor's provider before it is sent.
+
+### 2. Decide whether to delegate this task
+
+If the kind is off, or writing this task's brief would take most of the work, the lead does it. A task whose hard part is a question the lead can check the answer to is not such a task: it can be delegated as an investigation (below). A task can also be split: in the simulator port, the lead made a redesign's decisions and an executor carried out the rest.
+
+### Investigations
+
+An investigation is a task whose deliverable is an answer to one bounded question with evidence, rather than a change. Some of the three projects' best delegated work already had this shape: concord's diagnosis kind (one bounded question with a stop limit, where a measured negative result is a complete answer) went 12 of 12 for Devin at about $2 each; in the simulator port, executors located the code a port needed and named the state it read, and measured how many orders depend on one check; and in the reverse-engineering project, questions such as which function produces a given error and on what condition, or where a given record is stored, are the first shape in which that project could delegate at all.
+
+- The brief states the question, the evidence required, a stop limit, and what would falsify the answer, such as the competing function or the branch that would contradict it.
+- The evidence is primary artifacts: addresses, exact bytes, the decompile or disassembly files with their hashes, commands and their output. The executor's narrative does not count as evidence. The report states whether the falsifier was checked, and lists what it did not establish: indirect calls on paths it did not read, and any assumption it relied on. In the simulator port, one answer named a real function with real values, which the lead reproduced and acted on, but the function belonged to a different kind of object; a list of what was not established is what would have caught it.
+- The answer holds when the lead re-checks those artifacts and the falsifier, with that time charged to lead cost; a measured negative answer holds too. Its outcome measure is pass or fail or the lead score.
+- An investigation is usually a reviewed kind, even where the work built on its answer is deferred, since the lead can re-check the answer at once. It is admitted like any reviewed kind, two of the first three. Its required capabilities can include hash-pinned snapshots of the relevant decompiles as sealed inputs, which answers most such questions while keeping the executor off a single shared VM.
+
+Open-ended exploration, with no question defined yet, stays with the lead, or runs as parallel probes on the same prompt whose findings the lead compares; that pattern is outside this workflow.
+
+### 3. Find the eligible executors
+
+An executor is eligible when all of these hold:
+
+1. It is admitted to the kind and not dropped from it, its harness has every capability the kind lists, and it did not fail the task this one retries.
+2. It may take the task's class: in a reviewed or deferred kind it has held or steered a task of that class or the one below; in a gated kind any admitted executor may take any class.
+3. Its pool has room. A pool check admits the run when the pool stays at or under 1x pace and above its last 3 points, counting this run and the executor's running tasks. The run's need in points is its expected executor cost divided by the pool's dollars per quota point, plus the lead's expected cost for the task when the lead draws on the same pool, as a Claude lead does with Claude executors. Expected executor cost is its shrunk mean, as for cost per success; with no cost known for it, the check uses its default need. The pace check is a launch gate only: many agents can share one subscription, so a pool's percentage is not a measure of any project's cost.
+4. The shared resources the task needs are free: not reserved by a running task. Each project lists its own: concord, its single checkout; the simulator port, four checkouts with a fresh build per run (a reused build directory once gave a corpus count of 741 where fresh builds give 742) and one live client shared by at most two or three live tasks; the reverse-engineering project, a single VM and the memory of a host where two heavy jobs at once get one killed.
+
+### 4. Choose
+
+The choice is one of four answers:
+
+- delegate to an executor;
+- admit: give the task to a candidate the lead names as an admission trial, a lowest-class task in a reviewed kind, or the calibration and then a bounded live task in a deferred kind, with the lead's cost of building the calibration on the admit record;
+- wait, naming the resource or pool that is busy, when every otherwise eligible executor is blocked only by a reservation or by its pool's pace. A wait has a deadline the project sets; after it the task goes to the lead if the lead's own pool has room, and otherwise keeps waiting. Claude and Codex were once both over pace for more than a day while the simulator port's lead ran on Claude, which is why the fallback checks the lead's pool;
+- lead, when the kind or class is off, no executor is admitted or eligible for a reason other than a busy resource or pool, or step 2 applies.
+
+`select` and `open` are one step under the ledger's lock for every answer but wait, the lead's choices included, so two sessions, or the lead and a run, cannot both claim a free checkout or VM.
+
+In a gated or reviewed kind, sample among the eligible executors:
+
+1. Warm-up: an executor with no tasks of this kind, counting running and awaiting-verdict ones, gets the task; among several, the one with the lowest expected executor cost. An executor with no verdict yet in the kind takes no further task there until its first closes: the simulator port once launched three tasks on one executor before any had a verdict, and two needed corrections.
+2. Otherwise, for each executor draw a success rate p from Beta(a, b) over the kind, and give the task to the lowest expected cost per task divided by p, the expected cost being its shrunk mean.
+
+In a gated kind a failure costs a gate run, and in a reviewed kind admission and the drop rule bound the risk while cost per success already carries the lead's correction cost; a fixed lowest-cost choice after three tasks would lock onto whoever was lucky early. In a deferred kind, take the eligible executor with the lowest cost per success: exploring there costs silent mistakes found weeks later, and admission has already done the exploring. The no-second-task rule of warm-up applies here too: until an executor has a final verdict in a deferred kind it holds one task there, so one cheap admission does not take every deferred task for weeks before any check has run.
+
+Record the reason for each choice: warm-up, draw with its seed, catch-up, cheapest (in a deferred kind), admit, wait, or lead.
+
+### 5. Use quota that would otherwise expire
+
+When a pool is under 1x pace and resets within a day, the next eligible task in a gated kind goes to an executor on that pool, chosen as in step 4 among that pool's executors, unless the kind's single shared resource is reserved. Its record is marked catch-up. Catch-up records count in outcomes and in the lead's cost; their executor cost is kept in the record and left out of the cost statistics, not entered as zero, since it spends allowance that would otherwise be lost.
+
+### 6. Record the task
+
+The ledger is one append-only file of events per project, written under a lock and folded by task id into one record per task. Every count, cost and scorecard is recomputed from it; concord's summary table, last updated 2026-10-26 while its log grew to 151 rows, shows what a second copy turns into.
+
+- open, from `select` (the task is then running): task id, kind, class, actor, the retried task if any, the choice's reason, the catch-up mark, the shared resources reserved, and, in a deferred kind, the authoritative check that will close it and the cases or branches that check must cover;
+- started: what runs the task: for an executor the aop run, by its run id, once aop has launched, and for any task the agent-job units it runs, which the lead's turns are matched against. An open with no started event after a project-set lease, 30 minutes by default, is closed as aborted, so a session that dies between select and launch cannot hold the checkout or VM;
+- close, once the result has landed or been discarded, releasing its reservations (a deferred task is then awaiting verdict): outcome, what caught a failure and its defect, brief error if any, resume count, actor cost, lead cost, run duration and minutes each shared resource was held. Before closing, the lead re-measures any number the actor reported that would change a decision, on a fresh build;
+- verdict, in a deferred kind: final when the named check has run on the named cases. Branches the task left out stay listed as unresolved and do not hold it open; a later failure in one of them is a new task, not an overturn;
+- overturn: a later finding that a final result is wrong. It names one primary task as the root cause, the one whose commit introduced the overturned code, turns that task's outcome to corrected, and records the redo cost on it.
+
+A running task keeps its reservations until the lead closes it, since only the lead can judge the result; a run that crashed is closed by the lead as aborted. None of the three projects has a recorded case of a crashed run holding a resource, so the helper does not watch runs or units itself. The helper runs no cleanup of its own: none of the three projects has a recorded case where state a run left behind broke a later task. The simulator port's stale corpus count is prevented by running comparisons on a fresh build directory, and the reverse-engineering project's capture scripts already clean their VM at exit and at start. A cleanup step comes back when a project records an incident it would have prevented. Running and awaiting-verdict tasks are left out of the draw, the drop rule and the scorecard's counts, and their number is shown beside each actor, so none is credited before the check that defines success. A brief error is the lead's: a task that stopped for the missing decision stays steered, a success for the executor, and the extra resumes the error caused are left out of the executor's cost and counted in the lead's.
+
+### 7. Read the scorecard
+
+For each kind and class, show each actor, the lead included, as a point: cost per success (or per unit of yield) on one axis and its successes out of tasks with a verdict on the other, with the spread of its lead scores where the kind uses them, so a kind whose scores cluster is visibly being decided by cost, labelled with its provider, its integrity corrections, its minutes holding shared resources, and its count of running and awaiting-verdict tasks. Show counts, not percentages, while samples are small. An executor that holds a shared resource far longer than others is visible here, and the lead can disable it with a stated reason.
+
+## The helper
+
+A small command, `delegate`, does the arithmetic, so no lead does it in its own context:
+
+- `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--admit EXECUTOR]`: chooses delegate, admit, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
+- `started`, `close`, `verdict`, `overturn`, `suspend`, `resume`, `drop`: append the events above, `close` filling costs from aop's records and clanker-analytics;
+- `scorecard`: prints each kind's points.
+
+Further changes come from the ledger: the drop threshold and the size of the cost priors are settings to revisit once a few weeks of real records show how they behave, not by more argument about them.
+
+Each project keeps a small config naming its kinds, classes, how each kind is checked, each kind's and class's delegation state, its executors, the harness capabilities each kind needs, its shared resources, the wait deadline and the lead record grain.
+
+## Choices and their alternatives
+
+- Exploration scaled to how failures are caught: sampling where a gate or the lead's review catches them, a deterministic choice where they surface weeks later.
+- Cost per success rather than success rate alone, so an expensive executor does not take every task when a much cheaper one is nearly as reliable.
+- No dominance filter: with cost-aware sampling it only removes executors permanently on the noise of five tasks.
+- A drop rule for unreliability and against the lead, never against another executor, so the draw keeps spreading tasks across executors and none is lost because a cheaper one exists, and probabilistic rather than a fixed count, so a 70% executor is not dropped on three unlucky tasks.
+- Success rates at the kind level, with cost by class: the simulator port's record shows one executor's redesigns succeeding as often as its bounded ports at several times the price. A project whose classes differ in success would revisit this.
+- No price on time holding a resource: it is handled by reservation and the wait answer, and shown on the scorecard; a price per VM-minute would need an exchange rate nobody can measure.
+- Catch-up in live selection rather than an offline batch queue, which none of the three projects has the gated backlog to fill.
+- No extra weight on the lead's cost: the lead's limited capacity shows up as the wait and lead answers, and a multiplier would need evidence nobody has.
+- The outcome fields kept rather than reduced to pass or fail: the caught-by and defect fields are what made the simulator port's record of its weakest executor readable.
+- No drift events, backstop, lead refresh, run watching, priced cost priors, awaiting-verdict cap or candidate lists: each was reasoned rather than observed, and none of the three projects had a recorded case it would have handled. Each comes back when a project records one.
+- Lead cost from tagged turns rather than fixed constants: the simulator port's corrections of its weakest executor's ports cost the lead $17.57 against $8.46 of that executor's own runs, about twice as much, which a constant would hide.
+- No evidence carries from one project to another: kinds can share a name while their failure modes differ.
+
+## Adopting it
+
+- concord: most kinds are gated, so they turn on and are sampled. Its 151 earlier scorecard rows convert to open and close events with outcomes from their gate and diff columns; having no lead cost, they count in outcomes but not in cost per success.
+- The simulator port: emulator-checked translations and lookups with a reference check are gated; ports, metrics and pilots are reviewed, entered through lowest-class tasks.
+- The reverse-engineering project: most kinds are deferred and stay off behind its calibration, with the lead doing the work, until an executor passes it.
+- The trading-research project: its route bandit already samples with warm-up, a starvation floor and catch-up, scoring research cycles on its own rubric.
