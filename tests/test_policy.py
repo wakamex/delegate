@@ -97,6 +97,18 @@ class SelectionTests(unittest.TestCase):
         self.assertIn(("dear-pool", 40.0, None), pools.pool.calls)
         self.assertEqual(events[-1]["expected"]["pool_points"], 40.0)
 
+    def test_runs_already_going_on_a_pool_count_toward_its_check(self):
+        # cheap-pool has 60 long-window points free and runs take 40: one run fits, a second waits.
+        config = make_config(BASE + "\n[pools.cheap-pool]\nneed = 40\n")
+        pools = env(max_need={"cheap-pool": 60})
+        book = Book()
+        first, events = choose(config, book, kind="port", e=pools, admit="cheap")
+        self.assertEqual(first["answer"], "admit")
+        book.add(**{k: v for k, v in events[-1].items() if k != "at"})
+        second, _ = choose(config, book, kind="probe", e=pools, admit="cheap")
+        self.assertEqual((second["answer"], second["waiting_for"]), ("wait", "cheap-pool"))
+        self.assertEqual(pools.pool.calls[-1], ("cheap-pool", 80.0, 50.0))
+
     def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
         book = Book()
         book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="dear", reason="draw")

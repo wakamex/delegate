@@ -17,6 +17,8 @@ DRAWS = 4000
 # Points of each daily or 5-hour window an executor's first task in a kind must leave room for. Its cost is unknown,
 # and first runs have taken about half of such a window: two concurrent Devin runs used up its daily window in an hour.
 WARM_UP_NEED_SHORT = 50
+# usage-burn's default needs of a run, in points of each long (3 days or more) and short window.
+DEFAULT_NEED, DEFAULT_NEED_SHORT = 5.0, 25.0
 
 
 class SelectError(Exception):
@@ -361,6 +363,18 @@ def select(
             **({"executor": vars(config.executors[actor])} if actor in config.executors else {}),
         }, events
 
+    running: dict[str, list[Task]] = {}
+    for task in state.tasks.values():
+        if task.holding and (pool := getattr(config.executors.get(task.actor), "pool", None)):
+            running.setdefault(pool, []).append(task)
+
+    def running_need(task: Task) -> float:
+        """A running task's need of each long window: as reserved at its open, else its pool's fixed need."""
+        points = (task.open.get("expected") or {}).get("pool_points")
+        if points is not None:
+            return float(points)
+        return config.pool_need.get(config.executors[task.actor].pool, DEFAULT_NEED)
+
     def pool_room(executor, need_short=None) -> dict:
         cost = stats.expected_cost(executor.name, cls)
         points = need_points(config, executor.pool, cost)
@@ -372,7 +386,12 @@ def select(
             points = None if points is None else points + (extra or 0)
         if not executor.pool:
             return {"room": True, "catch_up": False, "points": points}
-        return {**env.pool(executor.pool, points, need_short), "points": points}
+        need = points
+        # usage-burn cannot see this project's runs already going on the pool, so their needs join this run's.
+        if going := running.get(executor.pool):
+            need = (DEFAULT_NEED if points is None else points) + sum(running_need(t) for t in going)
+            need_short = (need_short or DEFAULT_NEED_SHORT) + DEFAULT_NEED_SHORT * len(going)
+        return {**env.pool(executor.pool, need, need_short), "points": points}
 
     if admit:
         executor = config.executors.get(admit)
@@ -444,13 +463,10 @@ def select(
         eligible.append(name)
     # An executor's first task in a kind waits for a pool with no run of this project on it and room in its short
     # windows for a run of unknown cost, so warm-up does not stack a trial on a small subscription already in use.
-    running = {
-        config.executors[t.actor].pool for t in state.tasks.values() if t.holding and t.actor in config.executors
-    }
     rooms = {}
     for name in list(eligible):
         executor, untried = config.executors[name], not stats.of(name)
-        if untried and executor.pool and executor.pool in running:
+        if untried and executor.pool in running:
             rooms[name] = {"room": False}
         else:
             rooms[name] = pool_room(executor, WARM_UP_NEED_SHORT if untried else None)
