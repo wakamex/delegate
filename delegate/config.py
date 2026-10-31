@@ -67,6 +67,7 @@ class Config:
     executors: dict[str, Executor]
     kinds: dict[str, Kind]
     dollars_per_point: dict[str, float]
+    pool_need: dict[str, float] = field(default_factory=dict)
     candidate_families: list[str] = field(default_factory=list)
 
     @property
@@ -219,10 +220,15 @@ def load(path: Path) -> Config:
             re.compile(pattern)
         except re.error as exc:
             raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
-    pools = {
-        name: _number(value.get("dollars_per_point"), f"pools.{name}.dollars_per_point", 1e-12)
-        for name, value in data.get("pools", {}).items()
-    }
+    pools, pool_need = {}, {}
+    for name, value in data.get("pools", {}).items():
+        _known(value, {"dollars_per_point", "need"}, f"pools.{name}")
+        if ("dollars_per_point" in value) == ("need" in value):
+            raise ConfigError(f"pools.{name} needs one of dollars_per_point or need")
+        if "need" in value:
+            pool_need[name] = _number(value["need"], f"pools.{name}.need")
+        else:
+            pools[name] = _number(value["dollars_per_point"], f"pools.{name}.dollars_per_point", 1e-12)
     return Config(
         path=path,
         project=data["project"],
@@ -236,6 +242,7 @@ def load(path: Path) -> Config:
         executors=executors,
         kinds=kinds,
         dollars_per_point=pools,
+        pool_need=pool_need,
         candidate_families=families,
     )
 

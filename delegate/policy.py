@@ -286,8 +286,11 @@ def busy_until_verdict(stats: Stats, actor: str) -> bool:
 
 
 def need_points(config: Config, pool: str | None, dollars: float | None) -> float | None:
+    """The points of each long window a run takes: its dollars at the pool's rate, else the pool's fixed need."""
     rate = config.dollars_per_point.get(pool or "")
-    return None if rate is None or dollars is None else dollars / rate
+    if rate is None:
+        return config.pool_need.get(pool or "")
+    return None if dollars is None else dollars / rate
 
 
 def select(
@@ -361,7 +364,7 @@ def select(
     def pool_room(executor, need_short=None) -> dict:
         cost = stats.expected_cost(executor.name, cls)
         points = need_points(config, executor.pool, cost)
-        if executor.pool and executor.pool == config.lead_pool:
+        if executor.pool and executor.pool == config.lead_pool and executor.pool in config.dollars_per_point:
             lead_cost = (stats.expected_cost(executor.name, cls) or 0) - (
                 shrunk(stats._costs(stats.scope(executor.name, cls), "actor"), stats.actor_prior(executor.name)) or 0
             )

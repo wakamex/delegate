@@ -31,6 +31,9 @@ class ConfigTests(unittest.TestCase):
             ),
             BASE + '\n[kinds.x]\ncheck = "gated"\nstate = "on"\nmeasure = "pass-fail"\nclasses = ["a"]\n'
             'resources = ["gpu"]\n',
+            BASE + "\n[pools.cheap-pool]\n",
+            BASE + "\n[pools.cheap-pool]\nneed = 40\ndollars_per_point = 2\n",
+            BASE + "\n[pools.cheap-pool]\nneeds = 40\n",
         ):
             with self.assertRaises(ConfigError):
                 make_config(bad)
@@ -82,6 +85,17 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual((result["actor"], result["reason"]), ("dear", "draw"))
         self.assertIn(("cheap-pool", None, policy.WARM_UP_NEED_SHORT), pools.pool.calls)
         self.assertIn(("dear-pool", None, None), pools.pool.calls)
+
+    def test_a_pool_without_a_price_checks_its_fixed_need(self):
+        # dear-pool has no dollars_per_point, as for a subscription aop cannot price, so each run asks for its need.
+        config = make_config(BASE + "\n[pools.dear-pool]\nneed = 40\n")
+        book = Book()
+        book.task("tool", "dear", "held", cost=5)
+        pools = env()
+        result, events = choose(config, book, e=pools, retry=book.task("tool", "cheap", "corrected"))
+        self.assertEqual(result["actor"], "dear")
+        self.assertIn(("dear-pool", 40.0, None), pools.pool.calls)
+        self.assertEqual(events[-1]["expected"]["pool_points"], 40.0)
 
     def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
         book = Book()

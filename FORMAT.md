@@ -26,6 +26,9 @@ host-memory-gb = { capacity = 31 }       # or a capacity in units, reserved as a
 [pools.codex]
 dollars_per_point = 2.32                 # API-equivalent dollars per quota point, from clanker-analytics pace
 
+[pools.devin]
+need = 40                                # or, for a pool aop cannot price, the points of each long window a run takes
+
 [executors.terra-max]
 agent = "codex"
 model = "gpt-6.1-terra"
@@ -49,7 +52,7 @@ investigation = false                    # true for a kind of bounded investigat
 
 `check`, `state`, `measure` and `classes` are required for every kind, and every table rejects keys it does not define, so a misspelt key is an error rather than a silent default.
 
-`[pools.NAME] dollars_per_point` converts a run's expected cost into the points the pool check reserves for it. `clanker-analytics pace` reports it, but takes minutes to run, too long to call on every selection, so the lead copies it into the config now and then. A pool without one is checked with usage-burn's default need. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
+`[pools.NAME] dollars_per_point` converts a run's expected cost into the points the pool check reserves for it. `clanker-analytics pace` reports it, but takes minutes to run, too long to call on every selection, so the lead copies it into the config now and then. A pool whose runs aop cannot price, such as Devin's, sets `need` instead, the points of each window of 3 days or more a run takes, taken from how far past runs moved that window: in w3sim one Kimi K3 run on Devin used 43 points of its week, and usage-burn's default is 5. A pool sets one or the other; a pool with neither is checked with usage-burn's default need. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
 
 ## Ledger
 
