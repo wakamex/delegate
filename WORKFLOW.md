@@ -95,7 +95,7 @@ An executor is eligible when all of these hold:
 
 The choice is one of four answers:
 
-- delegate to an executor;
+- delegate to an executor, drawn by the rules below or assigned: the user or lead names an admitted executor with the reason, which skips the draw and the pool check but still waits for a busy resource. Warm-up keeps choosing executors with no task in a kind yet, so without an assignment a run the user had already given to one executor could only start outside the ledger;
 - admit: give the task to a candidate the lead names as an admission trial, a lowest-class task in a reviewed kind, or the calibration and then a bounded live task in a deferred kind, with the lead's cost of building the calibration on the admit record;
 - wait, naming the resource or pool that is busy, when every otherwise eligible executor is blocked only by a reservation or by its pool's pace. A wait has a deadline the project sets; after it the task goes to the lead if the lead's own pool has room, and otherwise keeps waiting. Claude and Codex were once both over pace for more than a day while the simulator port's lead ran on Claude, which is why the fallback checks the lead's pool;
 - lead, when the kind or class is off, no executor is admitted or eligible for a reason other than a busy resource or pool, or step 2 applies.
@@ -109,7 +109,7 @@ In a gated or reviewed kind, sample among the eligible executors:
 
 In a gated kind a failure costs a gate run, and in a reviewed kind admission and the drop rule bound the risk while cost per success already carries the lead's correction cost; a fixed lowest-cost choice after three tasks would lock onto whoever was lucky early. In a deferred kind, take the eligible executor with the lowest cost per success: exploring there costs silent mistakes found weeks later, and admission has already done the exploring. The no-second-task rule of warm-up applies here too: until an executor has a final verdict in a deferred kind it holds one task there, so one cheap admission does not take every deferred task for weeks before any check has run.
 
-Record the reason for each choice: warm-up, draw with its seed, catch-up, cheapest (in a deferred kind), admit, wait, or lead.
+Record the reason for each choice: warm-up, draw with its seed, catch-up, cheapest (in a deferred kind), admit, assigned with who chose it and why, wait, or lead.
 
 ### 5. Use quota that would otherwise expire
 
@@ -135,7 +135,7 @@ For each kind and class, show each actor, the lead included, as a point: cost pe
 
 A small command, `delegate`, does the arithmetic, so no lead does it in its own context:
 
-- `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--admit EXECUTOR]`: chooses delegate, admit, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
+- `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--assign EXECUTOR --why ..]`: chooses delegate, admit, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
 - `started`, `close`, `verdict`, `overturn`, `suspend`, `resume`, `drop`: append the events above, `close` filling costs from aop's records and clanker-analytics;
 - `scorecard`: prints each kind's points.
 

@@ -233,6 +233,8 @@ def cmd_select(config, session, args, moment):
         args.retry,
         args.admit,
         since,
+        args.assign,
+        args.why,
     )
     for event in events:
         session.append(event)
@@ -503,6 +505,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--retry", metavar="TASK")
     s.add_argument("--admit", metavar="EXECUTOR")
     s.add_argument("--since", help="when this task started waiting, from a previous wait answer")
+    s.add_argument(
+        "--assign", metavar="EXECUTOR", help="open for this admitted executor, skipping the draw and pool check"
+    )
+    s.add_argument("--why", help="with --assign: who chose it and why, such as 'user: cursor confirms this fixture'")
 
     s = sub.add_parser("started", help="record what holds the task's reservation")
     s.add_argument("task")

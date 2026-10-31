@@ -72,8 +72,9 @@ A task's record is its events folded in order: later fields replace earlier ones
 |---|---|
 | `kind`, `class` | from the config |
 | `actor` | an executor name from the config, or `"lead"` |
-| `reason` | `warm-up`, `draw`, `cheapest`, `catch-up`, `admit`, `lead` |
+| `reason` | `warm-up`, `draw`, `cheapest`, `catch-up`, `admit`, `assigned`, `lead` |
 | `seed` | the draw's seed, for `draw` |
+| `why` | for `assigned`: who chose the executor and why, in the lead's words |
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: 1}` for a counted one, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |
 | `token_cap` | the brief's cap |
@@ -119,7 +120,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 | Command | Writes | Does |
 |---|---|---|
-| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `admit`, `wait` or `lead` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured |
+| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `admit`, `wait` or `lead` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured |
 | `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | |
 | `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript |
 | `delegate verdict TASK --outcome ..` | `verdict` | |

@@ -185,6 +185,18 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(policy.SelectError):
             choose(self.config, Book(), kind="port", cls="first-reading", admit="cheap")
 
+    def test_assign_opens_for_a_named_admitted_executor_with_the_reason_recorded(self):
+        # The pool is full and the draw would warm up another executor; the assignment holds and says why.
+        full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})
+        result, events = choose(self.config, Book(), kind="tool", e=full, assign="dear", why="user: dear confirms it")
+        self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "dear", "assigned"))
+        self.assertEqual(events[-1]["why"], "user: dear confirms it")
+        self.assertFalse(full.pool.calls)
+        with self.assertRaisesRegex(policy.SelectError, "needs --why"):
+            choose(self.config, Book(), kind="tool", assign="dear")
+        with self.assertRaisesRegex(policy.SelectError, "candidate in port"):
+            choose(self.config, Book(), kind="port", assign="dear", why="lead")
+
     def test_wait_while_pools_are_full_then_the_lead_after_the_deadline(self):
         full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})
         result, events = choose(self.config, Book(), e=full)

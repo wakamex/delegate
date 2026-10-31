@@ -299,6 +299,8 @@ def select(
     retry: str | None = None,
     admit: str | None = None,
     since: datetime | None = None,
+    assign: str | None = None,
+    why: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """The answer, and the events to append: drops the rule made, then the open (none for wait)."""
     kind = config.kinds.get(kind_name)
@@ -340,7 +342,7 @@ def select(
             "token_cap": token_cap,
             "expected": expected,
         }
-        for key in ("seed", "retry_of"):
+        for key in ("seed", "retry_of", "why"):
             if extra.get(key) is not None:
                 event[key] = extra[key]
         events.append(event)
@@ -384,6 +386,27 @@ def select(
         if not room["room"]:
             return answer("wait", waiting_for=executor.pool)
         return answer("admit", admit, "admit", points=room["points"])
+
+    if assign:
+        executor = config.executors.get(assign)
+        if executor is None:
+            raise SelectError(f"unknown executor {assign!r}")
+        if admit:
+            raise SelectError("--assign and --admit cannot be combined")
+        if not why:
+            raise SelectError("an assignment needs --why, the user's or lead's reason")
+        if (position := standing(stats, assign)) != "admitted":
+            raise SelectError(
+                f"{assign} is {position} in {kind_name}; assign an admitted executor, or --admit a new one"
+            )
+        if not set(kind.capabilities) <= set(executor.capabilities):
+            raise SelectError(
+                f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(executor.capabilities))}"
+            )
+        if busy:
+            return answer("wait", waiting_for=busy)
+        points = need_points(config, executor.pool, stats.expected_cost(assign, cls))
+        return answer("delegate", assign, "assigned", points=points, why=why)
 
     def lead(reason="lead"):
         if busy:
