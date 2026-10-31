@@ -73,21 +73,25 @@ def make_config(text: str = BASE, directory: Path | None = None):
 class FakePools:
     """Pool room by target; a target nobody declared is a bug in the test and raises."""
 
-    def __init__(self, rooms: dict[str, bool], catch_up: set[str] = frozenset()):
-        self.rooms, self.catch_up, self.calls = rooms, set(catch_up), []
+    def __init__(self, rooms: dict[str, bool], catch_up: set[str] = frozenset(), short_full: set[str] = frozenset()):
+        self.rooms, self.catch_up, self.short_full, self.calls = rooms, set(catch_up), set(short_full), []
 
     def __call__(self, target, need, need_short):
         if target not in self.rooms:
             raise AssertionError(f"pool check for undeclared target {target!r}")
         if need is not None and need < 0:
             raise AssertionError("negative need")
-        self.calls.append((target, need))
-        return {"room": self.rooms[target], "catch_up": target in self.catch_up}
+        if need_short is not None and need_short < 0:
+            raise AssertionError("negative short need")
+        self.calls.append((target, need, need_short))
+        # A target in SHORT_FULL has room for the default short need but not for a larger one.
+        short_room = need_short is None or target not in self.short_full
+        return {"room": self.rooms[target] and short_room, "catch_up": target in self.catch_up}
 
 
-def env(rooms=None, catch_up=(), seed=1) -> Env:
+def env(rooms=None, catch_up=(), seed=1, short_full=()) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, set(catch_up)), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, set(catch_up), set(short_full)), rng=random.Random(seed))
 
 
 class Book:

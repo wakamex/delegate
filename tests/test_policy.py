@@ -65,6 +65,30 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "cheap", "warm-up"))
         self.assertEqual(events[-1]["event"], "open")
 
+    def test_warm_up_skips_a_pool_with_a_run_of_this_project_in_flight(self):
+        # cheap is untried in tool but its pool runs a port task; dear, with a record and its own run going, is drawn.
+        book = Book()
+        book.task("tool", "dear", "held", cost=5)
+        book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="cheap", reason="draw")
+        book.add(event="open", task="probe-0101", kind="probe", **{"class": "bounded"}, actor="dear", reason="draw")
+        result, _ = choose(self.config, book)
+        self.assertEqual((result["actor"], result["reason"]), ("dear", "draw"))
+
+    def test_warm_up_needs_room_for_half_a_short_window(self):
+        book = Book()
+        book.task("tool", "dear", "held", cost=5)
+        pools = env(short_full={"cheap-pool"})
+        result, _ = choose(self.config, book, e=pools)
+        self.assertEqual((result["actor"], result["reason"]), ("dear", "draw"))
+        self.assertIn(("cheap-pool", None, policy.WARM_UP_NEED_SHORT), pools.pool.calls)
+        self.assertIn(("dear-pool", None, None), pools.pool.calls)
+
+    def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
+        book = Book()
+        book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="dear", reason="draw")
+        result, _ = choose(self.config, book, e=env(short_full={"cheap-pool"}))
+        self.assertEqual((result["answer"], result["waiting_for"]), ("wait", "cheap-pool"))
+
     def test_no_second_task_before_a_first_verdict(self):
         book = Book()
         book.task("tool", "dear", "held", cost=5)
