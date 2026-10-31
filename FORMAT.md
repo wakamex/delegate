@@ -15,7 +15,6 @@ wait_deadline_minutes = 240              # after this a waiting task goes to the
 [lead]
 pool = "claude/lead-account"             # pool-check target of the account the lead runs on
 session = "0123abcd"                     # the lead's session id, a default for lead cost
-grain = "task"                           # "task", or "slice" for one record per committed slice
 
 [resources]
 checkout = ["sim-a", "sim-b", "sim-c", "sim-d"]  # named instances, one task each
@@ -41,7 +40,6 @@ classes = ["bounded", "first-reading", "redesign"]
 class_state = { redesign = "lead-only" } # overrides of the kind's state per class
 capabilities = []                        # every executor here must have these
 resources = ["checkout", "live-client"]  # what a task of this kind reserves by default; "host-memory-gb=16" reserves an amount
-references = { "port-0012" = 30, "port-0031" = 60, "port-0044" = 90 }  # lead-score reference tasks
 investigation = false                    # true for a kind of bounded investigations
 ```
 
@@ -49,7 +47,7 @@ investigation = false                    # true for a kind of bounded investigat
 
 `check`, `state`, `measure` and `classes` are required for every kind, and every table rejects keys it does not define, so a misspelt key is an error rather than a silent default.
 
-The pool check takes a run's expected dollars and converts them to each window's points itself, at the dollars per point clanker-analytics measures for that window. `[pools.NAME] need` is for a pool it has no measured price for, such as Devin's: the points of each window a run takes, from how far past runs moved it (in w3sim one Kimi K3 run on Devin used 43 points of its week), counted for the new run and for each of the project's runs already going on the pool. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
+The pool check takes a run's expected dollars and converts them to each window's points itself, at the dollars per point clanker-analytics measures for that window. `[pools.NAME] need` is for a pool it has no measured price for, such as Devin's: the points of each window a run takes, from how far past runs moved it (in w3sim one Kimi K3 run on Devin used 43 points of its week), counted for the new run and for each of the project's runs already going on the pool. Keys a config may still carry from an earlier version, `[pools.NAME] dollars_per_point` and `need_short`, `[lead] grain` and `[kinds.NAME] references`, are rejected with a message saying why each went.
 
 ## Ledger
 
@@ -78,7 +76,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: 1}` for a counted one, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |
 | `token_cap` | the brief's cap |
-| `expected` | `{"actor_cost": .., "lead_cost": ..}` at selection; older events may carry `pool_points` |
+| `expected` | `{"actor_cost": .., "lead_cost": ..}` at selection, each the shrunk mean the choice used, without redo cost; events before November 2026 hold the whole expected cost in `actor_cost` and lead plus redo in `lead_cost`, and some carry `pool_points` |
 | `check`, `cases` | deferred kinds: the authoritative check that will close it and what it must cover |
 
 `started`: what runs the task: `aop_run` (its id) and `units` (agent-job unit names). An aop run inside an agent-job unit records both, since the lead's turns are triggered by messages naming the unit.

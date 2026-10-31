@@ -7,7 +7,6 @@ wait_deadline_minutes = 240
 [lead]
 pool = "claude/lead-account"
 session = "0123abcd"
-grain = "task"
 
 [resources]
 checkout = ["sim-a", "sim-b", "sim-c", "sim-d"]
@@ -37,7 +36,6 @@ measure = "lead-score"
 classes = ["bounded", "first-reading", "redesign"]
 class_state = { redesign = "lead-only" }
 resources = ["checkout", "live-client"]
-references = { "port-0012" = 30, "port-0031" = 60, "port-0044" = 90 }
 
 [kinds.tool]
 check = "gated"

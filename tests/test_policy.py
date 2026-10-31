@@ -39,6 +39,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 make_config(bad)
 
+    def test_a_removed_key_is_named_with_why_it_went(self):
+        for text, key in (
+            (BASE.replace("[lead]\n", '[lead]\ngrain = "task"\n'), "lead.grain"),
+            (
+                BASE.replace(
+                    'classes = ["bounded"]\n\n[kinds.probe]', 'classes = ["bounded"]\nreferences = {}\n\n[kinds.probe]'
+                ),
+                "kinds.recon.references",
+            ),
+            (BASE + "\n[pools.cheap-pool]\nneed_short = 5\n", "pools.cheap-pool.need_short"),
+        ):
+            with self.assertRaisesRegex(ConfigError, f"{key} is no longer used: .*; remove it"):
+                make_config(text)
+
 
 class LedgerTests(unittest.TestCase):
     def test_an_overturn_turns_its_root_corrected_with_zero_score(self):
@@ -332,6 +346,15 @@ class SelectionTests(unittest.TestCase):
         book.add(event="overturn", root=root, redo_cost=10.0, reason="later")
         after = Stats(self.config, book.state(), self.config.kinds["tool"], env()).expected_cost("cheap", "bounded")
         self.assertGreater(after, before + 4)
+
+    def test_an_open_records_the_expected_actor_and_lead_costs_apart(self):
+        # Redo cost is spent later, not by this run, so neither recorded part carries it.
+        book = Book()
+        root = book.task("tool", "dear", "held", cost=2, lead_cost=1)
+        book.add(event="overturn", root=root, redo_cost=3, reason="test")
+        book.task("tool", "cheap", "held", cost=2, lead_cost=1)
+        result, events = choose(self.config, book)
+        self.assertEqual(events[-1]["expected"], {"actor_cost": 2.0, "lead_cost": 1.0})
 
     def test_the_lead_is_charged_its_own_cost_once(self):
         book = Book()

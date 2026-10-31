@@ -10,7 +10,6 @@ CHECKS = ("gated", "reviewed", "deferred")
 STATES = ("on", "off")
 CLASS_STATES = ("on", "off", "lead-only")
 MEASURES = ("pass-fail", "yield", "lead-score")
-GRAINS = ("task", "slice")
 
 
 class ConfigError(Exception):
@@ -46,7 +45,6 @@ class Kind:
     capabilities: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     investigation: bool = False
-    references: dict[str, float] = field(default_factory=dict)
 
     def state_of(self, cls: str) -> str:
         """The class's delegation state: its override, else the kind's."""
@@ -62,7 +60,6 @@ class Config:
     wait_deadline_minutes: float
     lead_pool: str | None
     lead_session: str | None
-    grain: str
     resources: dict[str, Resource]
     executors: dict[str, Executor]
     kinds: dict[str, Kind]
@@ -110,15 +107,26 @@ KIND_KEYS = {
     "capabilities",
     "resources",
     "investigation",
-    "references",
 }
 EXECUTOR_KEYS = {"agent", "model", "effort", "pool", "capabilities"}
-LEAD_KEYS = {"pool", "session", "grain"}
+LEAD_KEYS = {"pool", "session"}
+
+
+# Keys a config may still set from an earlier version, with why each went; loading one names it.
+REMOVED = {
+    "dollars_per_point": "the pool check prices each window from clanker-analytics' measurements",
+    "need_short": "the pool check prices each window from clanker-analytics' measurements",
+    "grain": "nothing read it",
+    "references": "nothing read it; keep a kind's lead-score reference tasks in the project's notes",
+}
 
 
 def _known(table, keys, where):
     if not isinstance(table, dict):
         raise ConfigError(f"{where} must be a table")
+    for key in table:
+        if key in REMOVED and key not in keys:
+            raise ConfigError(f"{where}.{key} is no longer used: {REMOVED[key]}; remove it")
     if unknown := set(table) - keys:
         raise ConfigError(f"unknown keys in {where}: {', '.join(sorted(unknown))}")
 
@@ -209,7 +217,6 @@ def load(path: Path) -> Config:
             _strings(value.get("capabilities", []), f"{where}.capabilities"),
             reserved,
             bool(value.get("investigation", False)),
-            {task: _number(score, f"{where}.references.{task}") for task, score in value.get("references", {}).items()},
         )
     candidates = data.get("candidates", {})
     _known(candidates, {"families"}, "candidates")
@@ -221,12 +228,6 @@ def load(path: Path) -> Config:
             raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
     pool_need = {}
     for name, value in data.get("pools", {}).items():
-        for removed in ("dollars_per_point", "need_short"):
-            if removed in value:
-                raise ConfigError(
-                    f"pools.{name}.{removed} is no longer used: the pool check prices each window from "
-                    "clanker-analytics' measurements; remove it"
-                )
         _known(value, {"need"}, f"pools.{name}")
         if "need" not in value:
             raise ConfigError(f"pools.{name} sets nothing")
@@ -239,7 +240,6 @@ def load(path: Path) -> Config:
         wait_deadline_minutes=_number(data.get("wait_deadline_minutes", 240), "wait_deadline_minutes"),
         lead_pool=lead.get("pool"),
         lead_session=lead.get("session"),
-        grain=_choice(lead.get("grain", "task"), GRAINS, "lead.grain"),
         resources=resources,
         executors=executors,
         kinds=kinds,

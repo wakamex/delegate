@@ -40,17 +40,17 @@ class PoolCheckTests(unittest.TestCase):
         return result, json.loads(argv.read_text())
 
     def test_admitted_and_its_catch_up_window(self):
-        result, argv = self.check("admitted", "claude/mcosma", None, 5.0)
+        result, argv = self.check("admitted", "opencode", 2.5, None)
         self.assertEqual(result, {"room": True, "catch_up": False, "state": "admitted"})
-        self.assertEqual(argv, ["--check", "claude/mcosma", "--need", "5.0000"])
-        # The combined week, paced under 1x, resets 2026-11-03 13:00: within a day of this moment it is catch-up.
-        late, _ = self.check("admitted", "claude/mcosma", None, None, now="2026-11-02T14:00:00+00:00")
+        self.assertEqual(argv, ["--check", "opencode", "--cost", "2.5000"])
+        # The week, paced under 1x, resets 2026-11-02 00:00: within a day of this moment it is catch-up.
+        late, _ = self.check("admitted", "opencode", None, None, now="2026-11-01T01:00:00+00:00")
         self.assertTrue(late["catch_up"])
 
     def test_refused_and_unavailable_have_no_room(self):
-        refused, argv = self.check("refused", "devin", 40.0, 50.0)
+        refused, argv = self.check("refused", "devin", None, 40.0)
         self.assertEqual(refused["room"], False)
-        self.assertEqual(argv, ["--check", "devin", "--cost", "40.0000", "--need", "50.0000"])
+        self.assertEqual(argv, ["--check", "devin", "--need", "40.0000"])
         unavailable, _ = self.check("unavailable", "zcode", None, None)
         self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))
 

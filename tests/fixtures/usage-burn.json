@@ -1,14 +1,14 @@
 {
   "_source": "usage-burn --check output captured 2026-10-31 on the maintainer's machine, account ids zeroed",
   "admitted": {
-    "command": "usage-burn --check claude/mcosma",
+    "command": "usage-burn --check opencode",
     "exit": 0,
-    "stdout": "{\"target\": \"claude/mcosma\", \"provider\": \"claude\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"admitted\", \"admitted\": true, \"permanent\": false, \"reasons\": [], \"retry_after\": null, \"windows\": [{\"window\": \"Session (5h)\", \"paced\": false, \"used_pct\": 21.0, \"in_flight\": 0.0, \"resets_at\": \"2026-10-31T15:40:00.139437+00:00\", \"pace\": 0.25549854109741604, \"burn\": 4.436270759424897}, {\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 73.0, \"in_flight\": 0.0, \"resets_at\": \"2026-11-03T13:00:00.139462+00:00\", \"pace\": 1.2542919514348805, \"burn\": 0.6459355821896128}, {\"window\": \"Week combined (2 accounts)\", \"paced\": true, \"used_pct\": 36.5, \"in_flight\": 0.0, \"resets_at\": \"2026-11-03T13:00:00.139462+00:00\", \"pace\": 0.9670709016166668, \"burn\": null}]}"
+    "stdout": "{\"target\": \"opencode\", \"provider\": \"opencode\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"admitted\", \"admitted\": true, \"permanent\": false, \"reasons\": [], \"retry_after\": null, \"windows\": [{\"window\": \"Session (5h)\", \"paced\": false, \"used_pct\": 0.0, \"run_points\": 0.0, \"allowed_pct\": 100.0, \"accounts\": 1, \"resets_at\": null, \"pace\": null, \"burn\": null}, {\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 76.73239509999999, \"run_points\": 0.0, \"allowed_pct\": 98.8875, \"accounts\": 1, \"resets_at\": \"2026-11-02T00:00:00+00:00\", \"pace\": 0.9069826732108499, \"burn\": 1.5110631228284552}, {\"window\": \"Month (30d)\", \"paced\": true, \"used_pct\": 47.44566201666667, \"run_points\": 0.0, \"allowed_pct\": 54.9668, \"accounts\": 1, \"resets_at\": \"2026-11-15T10:22:13+00:00\", \"pace\": 0.9188939975266098, \"burn\": 1.0865842563407726}]}"
   },
   "refused": {
-    "command": "usage-burn --check devin --need 40 --need-short 50",
+    "command": "usage-burn --check devin --need 40",
     "exit": 1,
-    "stdout": "{\"target\": \"devin\", \"provider\": \"devin\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"refused\", \"admitted\": false, \"permanent\": false, \"reasons\": [\"Daily: 98% used and 0 in flight leave no room for 50 more above the 3-point floor\"], \"retry_after\": \"2026-11-01T08:00:00+00:00\", \"windows\": [{\"window\": \"Daily\", \"paced\": false, \"used_pct\": 98.0, \"in_flight\": 0.0, \"resets_at\": \"2026-11-01T08:00:00+00:00\", \"pace\": 3.4721877542722845, \"burn\": 0.027864576000102836}]}"
+    "stdout": "{\"target\": \"devin\", \"provider\": \"devin\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"refused\", \"admitted\": false, \"permanent\": false, \"reasons\": [\"Daily: 98% used leaves no room for 40 more\", \"Week (7d): 100% used leaves no room for 40 more\"], \"retry_after\": \"2026-11-03T03:12:41+00:00\", \"windows\": [{\"window\": \"Daily\", \"paced\": false, \"used_pct\": 98.0, \"run_points\": 40.0, \"allowed_pct\": 100.0, \"accounts\": 1, \"resets_at\": \"2026-11-01T08:00:00+00:00\", \"pace\": 1.6647931293294673, \"burn\": 0.0}, {\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 100.0, \"run_points\": 40.0, \"allowed_pct\": 100.0, \"accounts\": 1, \"resets_at\": \"2026-11-01T08:00:00+00:00\", \"pace\": 1.0624312324954455, \"burn\": 0.0}]}"
   },
   "unavailable": {
     "command": "usage-burn --check zcode",

@@ -66,8 +66,8 @@ def mean(values: list[float]) -> float | None:
 class Stats:
     """Per-actor figures for one kind, from the ledger."""
 
-    def __init__(self, config: Config, state: State, kind: Kind, env: Env, token_cap: float | None = None):
-        self.config, self.state, self.kind, self.env, self.token_cap = config, state, kind, env, token_cap
+    def __init__(self, config: Config, state: State, kind: Kind, env: Env):
+        self.config, self.state, self.kind, self.env = config, state, kind, env
         self.tasks = kind_tasks(state, kind.name)
 
     def of(self, actor: str) -> list[Task]:
@@ -99,19 +99,22 @@ class Stats:
         others = [t for t in self.tasks if (t.actor == LEAD) == (actor == LEAD)]
         return mean(self._costs(others, "actor"))
 
-    def expected_cost(self, actor: str, cls: str) -> float | None:
-        """Expected total cost of one task: shrunk actor, lead and redo costs."""
+    def cost_parts(self, actor: str, cls: str) -> tuple[float | None, float, float]:
+        """Expected actor, lead and redo cost of one task, each a shrunk mean; the actor part None when unknown."""
         scope = self.scope(actor, cls)
         actor_part = shrunk(self._costs(scope, "actor"), self.actor_prior(actor))
-        if actor_part is None:
-            return None
         delegated = [t for t in self.tasks if t.actor != LEAD]
         lead_part = 0.0
         if actor != LEAD:
             lead_part = shrunk(self._costs(scope, "lead"), mean(self._costs(delegated, "lead"))) or 0.0
         redo_prior = mean([t.redo_cost for t in self.tasks if t.final]) or 0.0
         redo_part = shrunk([t.redo_cost for t in scope if t.final], redo_prior) or 0.0
-        return actor_part + lead_part + redo_part
+        return actor_part, lead_part, redo_part
+
+    def expected_cost(self, actor: str, cls: str) -> float | None:
+        """Expected total cost of one task: shrunk actor, lead and redo costs."""
+        actor_part, lead_part, redo_part = self.cost_parts(actor, cls)
+        return None if actor_part is None else actor_part + lead_part + redo_part
 
     def yield_factor(self, actor: str) -> float:
         """Yield kinds: the shrunk mean yield per successful task; 1 otherwise."""
@@ -303,7 +306,7 @@ def select(
         raise SelectError(f"unknown kind {kind_name!r}")
     if cls not in kind.classes:
         raise SelectError(f"unknown class {cls!r} for kind {kind_name}; classes are {', '.join(kind.classes)}")
-    stats = Stats(config, state, kind, env, token_cap)
+    stats = Stats(config, state, kind, env)
     specs = resources if resources is not None else kind.resources
     reservation, busy = reserve(config, state, specs)
     excluded = state.tasks[retry].actor if retry and retry in state.tasks else None
@@ -316,14 +319,8 @@ def select(
         if kind_of_answer == "wait":
             return {**result, "waiting_for": extra["waiting_for"], "since": (since or now).isoformat()}, events
         task_id = f"{kind_name}-{sum(t.kind == kind_name for t in state.tasks.values()) + 1:04d}"
-        expected = {
-            "actor_cost": stats.expected_cost(actor, cls),
-            "lead_cost": None,
-        }
-        if actor != LEAD:
-            expected["lead_cost"] = (stats.expected_cost(actor, cls) or 0) - (
-                shrunk(stats._costs(stats.scope(actor, cls), "actor"), stats.actor_prior(actor)) or 0
-            )
+        actor_part, lead_part, _ = stats.cost_parts(actor, cls)
+        expected = {"actor_cost": actor_part, "lead_cost": None if actor == LEAD else lead_part}
         event = {
             "event": "open",
             "at": now.isoformat(),
@@ -375,11 +372,8 @@ def select(
     def pool_room(executor) -> dict:
         if not executor.pool:
             return {"room": True, "catch_up": False}
-        total = stats.expected_cost(executor.name, cls)
-        actor = shrunk(stats._costs(stats.scope(executor.name, cls), "actor"), stats.actor_prior(executor.name))
-        return check_pool(
-            executor.pool, pool_dollars(executor.name, actor, None if total is None else total - (actor or 0))
-        )
+        actor_part, lead_part, _ = stats.cost_parts(executor.name, cls)
+        return check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
 
     if admit:
         executor = config.executors.get(admit)
