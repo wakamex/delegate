@@ -32,7 +32,7 @@ class CliTests(unittest.TestCase):
             "aop_result": lambda run: (
                 json.loads(p.read_text()) if (p := self.results / f"{run}.json").exists() else None
             ),
-            "lead_cost": lambda config, task, runs=(), session=None: None,
+            "lead_cost": lambda config, task, runs=(), session=None, other_opens=(): None,
         }
         patcher = mock.patch.dict(cli.ENV, patches)
         patcher.start()
@@ -65,6 +65,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(closed["cost"], {"actor": 2.5, "lead": 0.75})
         self.assertEqual(closed["minutes"]["run"], 10.0)
         self.assertEqual([e["event"] for e in self.events()], ["open", "started", "close"])
+
+    def test_repeated_list_options_append(self):
+        _, chosen = self.run_cli("select", "tool", "bounded")
+        code, closed = self.run_cli(
+            "close", chosen["task"], "--outcome", "held", "--commit", "d14bf870", "--commit", "74ffd39f"
+        )
+        self.assertEqual((code, closed["commits"]), (0, ["d14bf870", "74ffd39f"]))
 
     def test_close_checks_the_kind_s_rules(self):
         _, chosen = self.run_cli("select", "recon", "bounded", "--admit", "cheap")

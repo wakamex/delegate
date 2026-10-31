@@ -85,21 +85,38 @@ def aop_result(run_id: str) -> dict | None:
         return None
 
 
-def charged_lead_cost(turns, costs, names, opened) -> float:
-    """Sum the cost of the turns charged to a task: each turn whose triggering message names one of NAMES (its
-    agent-job units or aop runs), and the turn in which the task was opened, which holds its brief. Every cost row
-    belongs to the latest turn started at or before it; other turns, including the user's own, charge no task."""
+def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
+    """Sum the lead cost charged to a task: each turn whose triggering message names one of NAMES (its agent-job
+    units or aop runs), and its part of the turn in which it was opened, which holds its brief. Every cost row
+    belongs to the latest turn started at or before it; other turns, including the user's own, charge no task.
+
+    A turn can open several tasks, so the opening turn is split among them at the times they were opened (this
+    task's OPENED and OTHER_OPENS): each takes the responses from the previous opening, or the turn's start, up to
+    its own, which hold its brief, and the last one opened also takes the rest of the turn, which holds its
+    launch. Nothing is charged to two tasks."""
     starts = [start for start, _ in turns]
+
+    def turn_of(moment):
+        return max((j for j, start in enumerate(starts) if start <= moment), default=None)
+
     # A name matches only as a whole token, so a unit job-ab does not match a message about job-ab2.
     patterns = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in names if name]
     charged = {i for i, (_, text) in enumerate(turns) if any(p.search(text) for p in patterns)}
-    opening = max((i for i, start in enumerate(starts) if start <= opened), default=None)
+    opening = turn_of(opened)
+    segment_start, segment_end = None, None
     if opening is not None:
-        charged.add(opening)
+        same_turn = [t for t in other_opens if turn_of(t) == opening]
+        segment_start = max((t for t in same_turn if t < opened), default=starts[opening])
+        # Only the last task opened in the turn runs on to its end.
+        segment_end = opened if any(t > opened for t in same_turn) else None
     total = 0.0
     for moment, cost in costs:
-        i = max((j for j, start in enumerate(starts) if start <= moment), default=None)
+        i = turn_of(moment)
         if i in charged:
+            total += cost
+        elif (
+            i is not None and i == opening and segment_start < moment and (segment_end is None or moment <= segment_end)
+        ):
             total += cost
     return round(total, 4)
 
@@ -142,7 +159,7 @@ def lead_session(config, given: str | None = None) -> str | None:
     return given or os.environ.get("DELEGATE_LEAD_SESSION") or config.lead_session
 
 
-def lead_cost_from_session(config, task, runs=(), session=None) -> float | None:
+def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) -> float | None:
     """The lead's turns charged to TASK, from the lead session's turns and priced responses as clanker-analytics
     reads them. Unknown when there is no session or clanker-analytics cannot say."""
     session = lead_session(config, session)
@@ -155,7 +172,7 @@ def lead_cost_from_session(config, task, runs=(), session=None) -> float | None:
     costs = [(moment, cost) for moment, cost in activity["costs"] if moment >= since]
     started = task.started or {}
     names = [name for name in [*(started.get("units") or []), started.get("aop_run"), *runs] if name]
-    return charged_lead_cost(activity["turns"], costs, names, task.opened)
+    return charged_lead_cost(activity["turns"], costs, names, task.opened, other_opens)
 
 
 ENV = {
@@ -319,7 +336,11 @@ def cmd_close(config, session, args, moment):
             if run_minutes is None:
                 run_minutes = sum(float(r.get("duration_seconds") or 0) for r in results) / 60
     lead_cost = (
-        args.lead_cost if args.lead_cost is not None else ENV["lead_cost"](config, task, runs, args.lead_session)
+        args.lead_cost
+        if args.lead_cost is not None
+        else ENV["lead_cost"](
+            config, task, runs, args.lead_session, [t.opened for t in session.state.tasks.values() if t.id != task.id]
+        )
     )
     held = {name: round((moment - task.opened).total_seconds() / 60, 1) for name in (task.open.get("resources") or {})}
     event.update(
@@ -486,7 +507,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("started", help="record what holds the task's reservation")
     s.add_argument("task")
     s.add_argument("--aop-run")
-    s.add_argument("--unit", nargs="+")
+    s.add_argument("--unit", nargs="+", action="extend")
 
     def judged(s, outcomes):
         s.add_argument("task")
@@ -496,7 +517,7 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("--score", type=float)
         s.add_argument("--score-reason")
         s.add_argument("--yield", dest="yield_", type=float)
-        s.add_argument("--evidence", nargs="+", help="artifact paths, hashed, or free references")
+        s.add_argument("--evidence", nargs="+", action="extend", help="artifact paths, hashed, or free references")
 
     s = sub.add_parser("close", help="close a task once its result has landed or been discarded")
     judged(s, ("held", "steered", "corrected", "aborted", "awaiting"))
@@ -506,9 +527,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lead-cost", type=float)
     s.add_argument("--lead-session", help="the lead's session id (default: DELEGATE_LEAD_SESSION, then the config)")
     s.add_argument("--run-minutes", type=float)
-    s.add_argument("--aop-run", nargs="+", help="further aop runs of the task")
-    s.add_argument("--commit", nargs="+")
-    s.add_argument("--claim", nargs="+")
+    s.add_argument("--aop-run", nargs="+", action="extend", help="further aop runs of the task")
+    s.add_argument("--commit", nargs="+", action="extend")
+    s.add_argument("--claim", nargs="+", action="extend")
     s.add_argument("--report")
     s.add_argument(
         "--falsifier-checked",
@@ -518,7 +539,7 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("verdict", help="record a deferred task's final verdict")
     judged(s, ("held", "corrected"))
-    s.add_argument("--unresolved", nargs="+")
+    s.add_argument("--unresolved", nargs="+", action="extend")
 
     s = sub.add_parser("overturn", help="overturn a standing result")
     s.add_argument("root", help="the task whose commit introduced the overturned code")
@@ -538,7 +559,9 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("reap", help="close opens that never started within the lease")
 
     s = sub.add_parser("candidates", help="list models aop offers that are not configured as executors")
-    s.add_argument("--agent", nargs="+", help="only these agents (default: the agents the project runs)")
+    s.add_argument(
+        "--agent", nargs="+", action="extend", help="only these agents (default: the agents the project runs)"
+    )
     s.add_argument("--all-agents", action="store_true", help="every agent aop offers")
     s.add_argument("--any-family", action="store_true", help="ignore the config's candidates.families patterns")
     s.add_argument("--limit", type=int, default=10, help="models per agent, priciest first (0 for all; default 10)")

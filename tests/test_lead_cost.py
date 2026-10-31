@@ -41,6 +41,14 @@ class ChargedTurns(unittest.TestCase):
         turns = [(at(0), "start"), (at(5), "Job job-ab2 succeeded"), (at(9), "Job job-ab succeeded")]
         self.assertEqual(charged_lead_cost(turns, [(at(6), 5.0), (at(10), 2.0)], ["job-ab"], at(30)), 2.0)
 
+    def test_tasks_opened_in_one_turn_split_it_without_double_charging(self):
+        # One turn writes two briefs and opens two tasks, at 3 and 6 minutes, then does other work.
+        turns = [(at(0), "brief two tasks"), (at(10), "next")]
+        costs = [(at(1), 1.0), (at(2), 2.0), (at(4), 4.0), (at(5), 8.0), (at(7), 16.0)]
+        first = charged_lead_cost(turns, costs, [], at(3), other_opens=[at(6)])
+        second = charged_lead_cost(turns, costs, [], at(6), other_opens=[at(3)])
+        self.assertEqual((first, second), (3.0, 28.0))  # the second also takes the rest of the turn, its launch
+
     def test_cost_before_the_first_turn_is_charged_to_none(self):
         self.assertEqual(charged_lead_cost(TURNS, [(at(0).replace(hour=11), 9.0)], ["job-port-7"], at(0)), 0.0)
 
