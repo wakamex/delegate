@@ -73,9 +73,10 @@ def make_config(text: str = BASE, directory: Path | None = None):
 class FakePools:
     """Pool room by target; a target nobody declared is a bug in the test and raises."""
 
-    def __init__(self, rooms: dict[str, bool], catch_up=frozenset(), short_full=frozenset(), max_need=None):
-        self.rooms, self.catch_up, self.short_full, self.calls = rooms, set(catch_up), set(short_full), []
-        self.max_need = max_need or {}  # target: the most points of its long windows left free
+    def __init__(self, rooms: dict[str, bool], catch_up=frozenset(), max_short=None, max_need=None):
+        self.rooms, self.catch_up, self.calls = rooms, set(catch_up), []
+        # target: the most points of its short and long windows left free, as usage-burn's needs default to 25 and 5
+        self.max_short, self.max_need = max_short or {}, max_need or {}
 
     def __call__(self, target, need, need_short):
         if target not in self.rooms:
@@ -85,15 +86,16 @@ class FakePools:
         if need_short is not None and need_short < 0:
             raise AssertionError("negative short need")
         self.calls.append((target, need, need_short))
-        # A target in SHORT_FULL has room for the default short need but not for a larger one.
-        short_room = need_short is None or target not in self.short_full
+        short_room = (
+            target not in self.max_short or (25.0 if need_short is None else need_short) <= self.max_short[target]
+        )
         long_room = target not in self.max_need or (5.0 if need is None else need) <= self.max_need[target]
         return {"room": self.rooms[target] and short_room and long_room, "catch_up": target in self.catch_up}
 
 
-def env(rooms=None, catch_up=(), seed=1, short_full=(), max_need=None) -> Env:
+def env(rooms=None, catch_up=(), seed=1, max_short=None, max_need=None) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, set(catch_up), set(short_full), max_need), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, set(catch_up), max_short, max_need), rng=random.Random(seed))
 
 
 class Book:

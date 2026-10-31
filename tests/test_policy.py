@@ -69,19 +69,22 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "cheap", "warm-up"))
         self.assertEqual(events[-1]["event"], "open")
 
-    def test_warm_up_skips_a_pool_with_a_run_of_this_project_in_flight(self):
-        # cheap is untried in tool but its pool runs a port task; dear, with a record and its own run going, is drawn.
+    def test_a_first_run_counts_the_runs_already_going_on_its_pool(self):
+        # cheap-pool has 60 short-window points free: a first run asks for 50, and a port already going there adds
+        # 25 at the default short need, so dear, with a record, is drawn; at a need_short of 5 the first run fits.
         book = Book()
         book.task("tool", "dear", "held", cost=5)
         book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="cheap", reason="draw")
-        book.add(event="open", task="probe-0101", kind="probe", **{"class": "bounded"}, actor="dear", reason="draw")
-        result, _ = choose(self.config, book)
+        result, _ = choose(self.config, book, e=env(max_short={"cheap-pool": 60}))
         self.assertEqual((result["actor"], result["reason"]), ("dear", "draw"))
+        small_runs = make_config(BASE + "\n[pools.cheap-pool]\nneed_short = 5\n")
+        result, _ = choose(small_runs, book, e=env(max_short={"cheap-pool": 60}))
+        self.assertEqual((result["actor"], result["reason"]), ("cheap", "warm-up"))
 
     def test_warm_up_needs_room_for_half_a_short_window(self):
         book = Book()
         book.task("tool", "dear", "held", cost=5)
-        pools = env(short_full={"cheap-pool"})
+        pools = env(max_short={"cheap-pool": 40})
         result, _ = choose(self.config, book, e=pools)
         self.assertEqual((result["actor"], result["reason"]), ("dear", "draw"))
         self.assertIn(("cheap-pool", None, policy.WARM_UP_NEED_SHORT), pools.pool.calls)
@@ -137,7 +140,7 @@ class SelectionTests(unittest.TestCase):
     def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
         book = Book()
         book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="dear", reason="draw")
-        result, _ = choose(self.config, book, e=env(short_full={"cheap-pool"}))
+        result, _ = choose(self.config, book, e=env(max_short={"cheap-pool": 40, "dear-pool": 60}))
         self.assertEqual((result["answer"], result["waiting_for"]), ("wait", "cheap-pool"))
 
     def test_no_second_task_before_a_first_verdict(self):
@@ -281,6 +284,16 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(later["answer"], "lead")
         no_lead = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": False})
         self.assertEqual(choose(self.config, Book(), e=no_lead, since=NOW - timedelta(minutes=61))[0]["answer"], "wait")
+
+    def test_the_lead_fallback_counts_the_runs_already_going_on_the_lead_s_pool(self):
+        # dear runs on the lead's pool and has a port going there, so the lead's own run asks for 25 plus 25.
+        config = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))
+        book = Book()
+        book.add(event="open", task="port-0101", kind="port", **{"class": "bounded"}, actor="dear", reason="draw")
+        pools = env(rooms={"cheap-pool": False, "lead-pool": True}, max_short={"lead-pool": 40})
+        later = choose(config, book, e=pools, since=NOW - timedelta(minutes=61))[0]
+        self.assertEqual((later["answer"], later["waiting_for"]), ("wait", "cheap-pool"))
+        self.assertEqual(pools.pool.calls[-1], ("lead-pool", 10.0, 50.0))
 
     def test_named_instances_and_amounts_against_capacity(self):
         book = Book()

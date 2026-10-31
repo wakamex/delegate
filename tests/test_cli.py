@@ -19,6 +19,46 @@ FIXTURE = Path(__file__).with_name("fixtures") / "aop-result.json"
 NO_POOLS = BASE.replace('pool = "cheap-pool"\n', "").replace('pool = "dear-pool"\n', "")
 
 
+class PoolCheckTests(unittest.TestCase):
+    """pool_check against usage-burn's recorded output for each state, run through a stub that replays it."""
+
+    RECORDED = json.loads((Path(__file__).with_name("fixtures") / "usage-burn.json").read_text())
+
+    def check(self, state, *args, now="2026-10-31T19:00:00+00:00"):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        recorded, argv = self.RECORDED[state], directory / "argv.json"
+        stub = directory / "usage-burn"
+        stub.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            f"open({str(argv)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+            f"print({recorded['stdout']!r})\nsys.exit({recorded['exit']})\n"
+        )
+        stub.chmod(0o755)
+        with mock.patch.object(cli, "USAGE_BURN", str(stub)), mock.patch.dict(os.environ, {"DELEGATE_NOW": now}):
+            result = cli.pool_check(*args)
+        return result, json.loads(argv.read_text())
+
+    def test_admitted_and_its_catch_up_window(self):
+        result, argv = self.check("admitted", "claude/mcosma", None, 5.0)
+        self.assertEqual(result, {"room": True, "catch_up": False, "state": "admitted"})
+        self.assertEqual(argv, ["--check", "claude/mcosma", "--need-short", "5.0000"])
+        # The combined week, paced under 1x, resets 2026-11-03 13:00: within a day of this moment it is catch-up.
+        late, _ = self.check("admitted", "claude/mcosma", None, None, now="2026-11-02T14:00:00+00:00")
+        self.assertTrue(late["catch_up"])
+
+    def test_refused_and_unavailable_have_no_room(self):
+        refused, argv = self.check("refused", "devin", 40.0, 50.0)
+        self.assertEqual(refused["room"], False)
+        self.assertEqual(argv, ["--check", "devin", "--need", "40.0000", "--need-short", "50.0000"])
+        unavailable, _ = self.check("unavailable", "zcode", None, None)
+        self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))
+
+    def test_a_check_that_cannot_be_made_is_an_error(self):
+        with self.assertRaisesRegex(cli.UsageError, "name one of Claude and GPT, Gemini as :SCOPE"):
+            self.check("error", "agy", None, None)
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
