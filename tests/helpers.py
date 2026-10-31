@@ -71,31 +71,28 @@ def make_config(text: str = BASE, directory: Path | None = None):
 
 
 class FakePools:
-    """Pool room by target; a target nobody declared is a bug in the test and raises."""
+    """Pool room by target, as usage-burn's check gives it; a target nobody declared is a bug in the test and raises.
+    BUDGET is the most dollars a target admits, and MAX_NEED the most points for a pool with no measured price."""
 
-    def __init__(self, rooms: dict[str, bool], catch_up=frozenset(), max_short=None, max_need=None):
+    def __init__(self, rooms: dict[str, bool], catch_up=frozenset(), budget=None, max_need=None):
         self.rooms, self.catch_up, self.calls = rooms, set(catch_up), []
-        # target: the most points of its short and long windows left free, as usage-burn's needs default to 25 and 5
-        self.max_short, self.max_need = max_short or {}, max_need or {}
+        self.budget, self.max_need = budget or {}, max_need or {}
 
-    def __call__(self, target, need, need_short):
+    def __call__(self, target, dollars, need):
         if target not in self.rooms:
             raise AssertionError(f"pool check for undeclared target {target!r}")
-        if need is not None and need < 0:
-            raise AssertionError("negative need")
-        if need_short is not None and need_short < 0:
-            raise AssertionError("negative short need")
-        self.calls.append((target, need, need_short))
-        short_room = (
-            target not in self.max_short or (25.0 if need_short is None else need_short) <= self.max_short[target]
+        if (dollars is not None and dollars < 0) or (need is not None and need < 0):
+            raise AssertionError("negative cost")
+        self.calls.append((target, None if dollars is None else round(dollars, 6), need))
+        fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
+            target not in self.max_need or (need or 0) <= self.max_need[target]
         )
-        long_room = target not in self.max_need or (5.0 if need is None else need) <= self.max_need[target]
-        return {"room": self.rooms[target] and short_room and long_room, "catch_up": target in self.catch_up}
+        return {"room": self.rooms[target] and fits, "catch_up": target in self.catch_up}
 
 
-def env(rooms=None, catch_up=(), seed=1, max_short=None, max_need=None) -> Env:
+def env(rooms=None, catch_up=(), seed=1, budget=None, max_need=None) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, set(catch_up), max_short, max_need), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, set(catch_up), budget, max_need), rng=random.Random(seed))
 
 
 class Book:

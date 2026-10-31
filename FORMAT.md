@@ -23,14 +23,8 @@ live-client = 2                          # or a count of interchangeable slots
 remote-host = 1
 host-memory-gb = { capacity = 31 }       # or a capacity in units, reserved as amounts
 
-[pools.codex]
-dollars_per_point = 2.32                 # API-equivalent dollars per quota point, from clanker-analytics pace
-
 [pools.devin]
-need = 40                                # or, for a pool aop cannot price, the points of each long window a run takes
-
-[pools."claude/lead-account"]
-need_short = 5                           # points of each 5-hour or daily window a run takes (default 25)
+need = 40                                # for a pool with no measured price, the points of each window a run takes
 
 [executors.terra-max]
 agent = "codex"
@@ -55,7 +49,7 @@ investigation = false                    # true for a kind of bounded investigat
 
 `check`, `state`, `measure` and `classes` are required for every kind, and every table rejects keys it does not define, so a misspelt key is an error rather than a silent default.
 
-`[pools.NAME] dollars_per_point` converts a run's expected cost into the points the pool check reserves for it. `clanker-analytics pace` reports it, but takes minutes to run, too long to call on every selection, so the lead copies it into the config now and then. A pool whose runs aop cannot price, such as Devin's, sets `need` instead, the points of each window of 3 days or more a run takes, taken from how far past runs moved that window: in w3sim one Kimi K3 run on Devin used 43 points of its week, and usage-burn's default is 5. A pool sets one or the other; a pool with neither is checked with usage-burn's default need. `need_short` is the points of each window shorter than 3 days a run takes, counted for the new run and for each of the project's runs already going on the pool; without it each run counts usage-burn's default of 25, and a run that is an executor's first in a kind always asks for 50. In w3sim two concurrent Sonnet ports of about 45 minutes left Claude's 5-hour window at 5%. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
+The pool check takes a run's expected dollars and converts them to each window's points itself, at the dollars per point clanker-analytics measures for that window. `[pools.NAME] need` is for a pool it has no measured price for, such as Devin's: the points of each window a run takes, from how far past runs moved it (in w3sim one Kimi K3 run on Devin used 43 points of its week), counted for the new run and for each of the project's runs already going on the pool. Defaults: `lead_refresh` is true for gated kinds and false otherwise, `awaiting_cap` is 1, and the other fields are empty.
 
 ## Ledger
 
@@ -84,7 +78,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: 1}` for a counted one, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |
 | `token_cap` | the brief's cap |
-| `expected` | `{"actor_cost": .., "lead_cost": .., "pool_points": ..}` at selection |
+| `expected` | `{"actor_cost": .., "lead_cost": ..}` at selection; older events may carry `pool_points` |
 | `check`, `cases` | deferred kinds: the authoritative check that will close it and what it must cover |
 
 `started`: what runs the task: `aop_run` (its id) and `units` (agent-job unit names). An aop run inside an agent-job unit records both, since the lead's turns are triggered by messages naming the unit.

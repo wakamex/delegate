@@ -39,15 +39,16 @@ def now() -> datetime:
 # ---- what select and close need from outside the ledger ------------------------------------------
 
 
-def pool_check(target: str, need: float | None, need_short: float | None) -> dict:
-    """Room on a quota pool from the pool check: exit 0 room, 1 or 3 none, 2 an error."""
+def pool_check(target: str, dollars: float | None, need: float | None) -> dict:
+    """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for:
+    exit 0 room, 1 or 3 none, 2 an error."""
     if not USAGE_BURN:
         return {"room": True, "catch_up": False, "state": "unchecked"}
     command = [USAGE_BURN, "--check", target]
+    if dollars is not None:
+        command += ["--cost", f"{dollars:.4f}"]
     if need is not None:
         command += ["--need", f"{need:.4f}"]
-    if need_short is not None:
-        command += ["--need-short", f"{need_short:.4f}"]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:

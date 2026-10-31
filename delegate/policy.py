@@ -14,11 +14,6 @@ FALLBACK_CONFIDENCE = 0.90  # drop when the success rate is this likely below on
 MIN_VERDICTS = 5  # verdicts an actor needs before it is compared
 CLASS_VERDICTS = 3  # verdicts in a class before cost is taken per class
 DRAWS = 4000
-# Points of each daily or 5-hour window an executor's first task in a kind must leave room for. Its cost is unknown,
-# and first runs have taken about half of such a window: two concurrent Devin runs used up its daily window in an hour.
-WARM_UP_NEED_SHORT = 50
-# usage-burn's default needs of a run, in points of each long (3 days or more) and short window.
-DEFAULT_NEED, DEFAULT_NEED_SHORT = 5.0, 25.0
 
 
 class SelectError(Exception):
@@ -29,7 +24,7 @@ class SelectError(Exception):
 class Env:
     """What select needs from outside the ledger, injectable for tests."""
 
-    pool: callable  # (target, need, need_short) -> {"room": bool, "catch_up": bool}
+    pool: callable  # (target, dollars, need) -> {"room": bool, "catch_up": bool}
     rng: random.Random
 
 
@@ -287,14 +282,6 @@ def busy_until_verdict(stats: Stats, actor: str) -> bool:
     return any(t.outcome != "aborted" for t in mine)
 
 
-def need_points(config: Config, pool: str | None, dollars: float | None) -> float | None:
-    """The points of each long window a run takes: its dollars at the pool's rate, else the pool's fixed need."""
-    rate = config.dollars_per_point.get(pool or "")
-    if rate is None:
-        return config.pool_need.get(pool or "")
-    return None if dollars is None else dollars / rate
-
-
 def select(
     config: Config,
     state: State,
@@ -332,7 +319,6 @@ def select(
         expected = {
             "actor_cost": stats.expected_cost(actor, cls),
             "lead_cost": None,
-            "pool_points": extra.get("points"),
         }
         if actor != LEAD:
             expected["lead_cost"] = (stats.expected_cost(actor, cls) or 0) - (
@@ -368,37 +354,32 @@ def select(
         if task.holding and (pool := getattr(config.executors.get(task.actor), "pool", None)):
             running.setdefault(pool, []).append(task)
 
-    def running_need(task: Task) -> float:
-        """A running task's need of each long window: as reserved at its open, else its pool's fixed need."""
-        points = (task.open.get("expected") or {}).get("pool_points")
-        if points is not None:
-            return float(points)
-        return config.pool_need.get(config.executors[task.actor].pool, DEFAULT_NEED)
+    def pool_dollars(name: str, cost: float | None, lead_cost: float | None) -> float | None:
+        """What a run spends on its actor's pool: its actor cost, and its lead cost when the lead shares the pool."""
+        if cost is None:
+            return None
+        return cost + (lead_cost or 0) if config.executors[name].pool == config.lead_pool else cost
 
-    def check_pool(pool: str, points: float | None, need_short: float | None = None) -> dict:
-        """The pool check for one more run needing POINTS of each long window, None for the pool's default."""
-        need, short_each = points, config.pool_need_short.get(pool)
-        if need_short is None:
-            need_short = short_each
-        # usage-burn cannot see this project's runs already going on the pool, so their needs join this run's.
-        if going := running.get(pool):
-            need = (DEFAULT_NEED if points is None else points) + sum(running_need(t) for t in going)
-            each = DEFAULT_NEED_SHORT if short_each is None else short_each
-            need_short = (each if need_short is None else need_short) + each * len(going)
-        return env.pool(pool, need, need_short)
+    def check_pool(pool: str, dollars: float | None) -> dict:
+        """The pool check for one more run spending DOLLARS on POOL, with the project's runs already going there,
+        which the pool's reading cannot show yet, and for a pool with no measured price its need in points for each
+        of those runs."""
+        going = running.get(pool, [])
+        for task in going:
+            expected = task.open.get("expected") or {}
+            spent = pool_dollars(task.actor, expected.get("actor_cost"), expected.get("lead_cost"))
+            dollars = spent if dollars is None else dollars + (spent or 0)
+        need = config.pool_need.get(pool)
+        return env.pool(pool, dollars, None if need is None else need * (1 + len(going)))
 
-    def pool_room(executor, need_short=None) -> dict:
-        cost = stats.expected_cost(executor.name, cls)
-        points = need_points(config, executor.pool, cost)
-        if executor.pool and executor.pool == config.lead_pool and executor.pool in config.dollars_per_point:
-            lead_cost = (stats.expected_cost(executor.name, cls) or 0) - (
-                shrunk(stats._costs(stats.scope(executor.name, cls), "actor"), stats.actor_prior(executor.name)) or 0
-            )
-            extra = need_points(config, executor.pool, lead_cost)
-            points = None if points is None else points + (extra or 0)
+    def pool_room(executor) -> dict:
         if not executor.pool:
-            return {"room": True, "catch_up": False, "points": points}
-        return {**check_pool(executor.pool, points, need_short), "points": points}
+            return {"room": True, "catch_up": False}
+        total = stats.expected_cost(executor.name, cls)
+        actor = shrunk(stats._costs(stats.scope(executor.name, cls), "actor"), stats.actor_prior(executor.name))
+        return check_pool(
+            executor.pool, pool_dollars(executor.name, actor, None if total is None else total - (actor or 0))
+        )
 
     if admit:
         executor = config.executors.get(admit)
@@ -417,7 +398,7 @@ def select(
         room = pool_room(executor)
         if not room["room"]:
             return answer("wait", waiting_for=executor.pool)
-        return answer("admit", admit, "admit", points=room["points"])
+        return answer("admit", admit, "admit")
 
     if assign:
         executor = config.executors.get(assign)
@@ -437,8 +418,7 @@ def select(
             )
         if busy:
             return answer("wait", waiting_for=busy)
-        points = need_points(config, executor.pool, stats.expected_cost(assign, cls))
-        return answer("delegate", assign, "assigned", points=points, why=why)
+        return answer("delegate", assign, "assigned", why=why)
 
     def lead(reason="lead"):
         if busy:
@@ -470,8 +450,7 @@ def select(
         eligible.append(name)
     rooms = {}
     for name in list(eligible):
-        # An executor's first task in a kind is of unknown cost, so it asks for room for a large one.
-        rooms[name] = pool_room(config.executors[name], None if stats.of(name) else WARM_UP_NEED_SHORT)
+        rooms[name] = pool_room(config.executors[name])
         if not rooms[name]["room"]:
             eligible.remove(name)
             pool_blocked.append(config.executors[name].pool)
@@ -479,7 +458,9 @@ def select(
         if busy or pool_blocked:
             deadline = timedelta(minutes=config.wait_deadline_minutes)
             if since and now - since >= deadline and not busy:
-                lead_room = check_pool(config.lead_pool, None) if config.lead_pool else {"room": True}
+                lead_room = (
+                    check_pool(config.lead_pool, stats.expected_cost(LEAD, cls)) if config.lead_pool else {"room": True}
+                )
                 if lead_room["room"]:
                     return lead()
             return answer("wait", waiting_for=busy or sorted(set(pool_blocked))[0])
@@ -488,7 +469,7 @@ def select(
         return answer("wait", waiting_for=busy)
 
     def pick(names: list[str], reason: str):
-        return answer("delegate", names[0], reason, points=rooms[names[0]]["points"])
+        return answer("delegate", names[0], reason)
 
     if kind.check == "deferred":
         ranked = sorted(
@@ -510,7 +491,7 @@ def select(
     rng = random.Random(seed)
     draws = {n: stats.cost_per_success_draws(n, cls, rng, 1)[0] for n in sorted(eligible)}
     best = min(draws, key=lambda n: (draws[n], n))
-    return answer("delegate", best, pool_reason or "draw", points=rooms[best]["points"], seed=seed, retry_of=retry)
+    return answer("delegate", best, pool_reason or "draw", seed=seed, retry_of=retry)
 
 
 def scorecard(config: Config, state: State, env: Env, only: str | None = None) -> list[dict]:

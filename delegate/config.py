@@ -66,9 +66,7 @@ class Config:
     resources: dict[str, Resource]
     executors: dict[str, Executor]
     kinds: dict[str, Kind]
-    dollars_per_point: dict[str, float]
     pool_need: dict[str, float] = field(default_factory=dict)
-    pool_need_short: dict[str, float] = field(default_factory=dict)
     candidate_families: list[str] = field(default_factory=list)
 
     @property
@@ -221,19 +219,18 @@ def load(path: Path) -> Config:
             re.compile(pattern)
         except re.error as exc:
             raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
-    pools, pool_need, pool_need_short = {}, {}, {}
+    pool_need = {}
     for name, value in data.get("pools", {}).items():
-        _known(value, {"dollars_per_point", "need", "need_short"}, f"pools.{name}")
-        if not value:
+        for removed in ("dollars_per_point", "need_short"):
+            if removed in value:
+                raise ConfigError(
+                    f"pools.{name}.{removed} is no longer used: the pool check prices each window from "
+                    "clanker-analytics' measurements; remove it"
+                )
+        _known(value, {"need"}, f"pools.{name}")
+        if "need" not in value:
             raise ConfigError(f"pools.{name} sets nothing")
-        if "dollars_per_point" in value and "need" in value:
-            raise ConfigError(f"pools.{name} sets both dollars_per_point and need; a run's need comes from one")
-        if "need" in value:
-            pool_need[name] = _number(value["need"], f"pools.{name}.need")
-        if "dollars_per_point" in value:
-            pools[name] = _number(value["dollars_per_point"], f"pools.{name}.dollars_per_point", 1e-12)
-        if "need_short" in value:
-            pool_need_short[name] = _number(value["need_short"], f"pools.{name}.need_short")
+        pool_need[name] = _number(value["need"], f"pools.{name}.need")
     return Config(
         path=path,
         project=data["project"],
@@ -246,9 +243,7 @@ def load(path: Path) -> Config:
         resources=resources,
         executors=executors,
         kinds=kinds,
-        dollars_per_point=pools,
         pool_need=pool_need,
-        pool_need_short=pool_need_short,
         candidate_families=families,
     )
 

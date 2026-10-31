@@ -14,9 +14,6 @@ checkout = ["sim-a", "sim-b", "sim-c", "sim-d"]
 live-client = 2
 remote-host = 1
 
-[pools.codex]
-dollars_per_point = 2.32
-
 [executors.terra-max]
 agent = "codex"
 model = "gpt-6.1-terra"
