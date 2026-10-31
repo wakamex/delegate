@@ -34,6 +34,7 @@ class ConfigTests(unittest.TestCase):
             BASE + "\n[pools.cheap-pool]\n",
             BASE + "\n[pools.cheap-pool]\nneed = 40\ndollars_per_point = 2\n",
             BASE + "\n[pools.cheap-pool]\nneeds = 40\n",
+            BASE + "\n[pools.cheap-pool]\nneed_short = -1\n",
         ):
             with self.assertRaises(ConfigError):
                 make_config(bad)
@@ -108,6 +109,30 @@ class SelectionTests(unittest.TestCase):
         second, _ = choose(config, book, kind="probe", e=pools, admit="cheap")
         self.assertEqual((second["answer"], second["waiting_for"]), ("wait", "cheap-pool"))
         self.assertEqual(pools.pool.calls[-1], ("cheap-pool", 80.0, 50.0))
+
+    def test_a_pool_s_short_need_counts_for_each_run(self):
+        # Runs on dear-pool take 5 points of its 5-hour window, so two going and a third ask for 15, not 75.
+        config = make_config(BASE + "\n[pools.dear-pool]\nneed_short = 5\n")
+        book = Book()
+        book.task("tool", "dear", "held", cost=5)
+        book.task("tool", "cheap", "held", cost=5)
+        for n in (1, 2):
+            book.add(
+                event="open", task=f"port-010{n}", kind="port", **{"class": "bounded"}, actor="dear", reason="draw"
+            )
+        pools = env(rooms={"cheap-pool": False, "dear-pool": True, "lead-pool": True})
+        result, _ = choose(config, book, e=pools)
+        self.assertEqual(result["actor"], "dear")
+        self.assertEqual(pools.pool.calls[-1], ("dear-pool", 15.0, 15.0))
+        # With nothing going a run asks for the pool's 5; a first run in a kind still asks for the warm-up's 50.
+        idle = env(rooms={"cheap-pool": False, "dear-pool": True, "lead-pool": True})
+        idle_book = Book()
+        idle_book.task("tool", "dear", "held", cost=5)
+        choose(config, idle_book, e=idle)
+        self.assertIn(("dear-pool", None, 5.0), idle.pool.calls)
+        idle.pool.calls.clear()
+        choose(config, Book(), e=idle)
+        self.assertIn(("dear-pool", None, policy.WARM_UP_NEED_SHORT), idle.pool.calls)
 
     def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
         book = Book()

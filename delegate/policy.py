@@ -386,11 +386,14 @@ def select(
             points = None if points is None else points + (extra or 0)
         if not executor.pool:
             return {"room": True, "catch_up": False, "points": points}
-        need = points
+        need, short_each = points, config.pool_need_short.get(executor.pool)
+        if need_short is None:
+            need_short = short_each
         # usage-burn cannot see this project's runs already going on the pool, so their needs join this run's.
         if going := running.get(executor.pool):
             need = (DEFAULT_NEED if points is None else points) + sum(running_need(t) for t in going)
-            need_short = (need_short or DEFAULT_NEED_SHORT) + DEFAULT_NEED_SHORT * len(going)
+            each = DEFAULT_NEED_SHORT if short_each is None else short_each
+            need_short = (each if need_short is None else need_short) + each * len(going)
         return {**env.pool(executor.pool, need, need_short), "points": points}
 
     if admit:
