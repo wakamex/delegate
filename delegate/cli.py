@@ -259,7 +259,11 @@ def _evidence(values):
     out = []
     for value in values or []:
         path = Path(value)
-        if path.is_file():
+        try:
+            is_file = path.is_file()
+        except OSError:  # free text too long to be a file name
+            is_file = False
+        if is_file:
             out.append({"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         else:
             out.append(value)

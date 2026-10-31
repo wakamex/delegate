@@ -102,8 +102,11 @@ class CliTests(unittest.TestCase):
         self.run_cli("started", task, "--unit", "m4-recon")
         self.assertEqual(self.run_cli("close", task, "--outcome", "awaiting", "--actor-cost", "1")[0], 0)
         self.assertIn("evidence", self.run_cli("verdict", task, "--outcome", "held")[1]["error"])
-        code, verdict = self.run_cli("verdict", task, "--outcome", "held", "--evidence", "block 1,134,720,010")
-        self.assertEqual((code, verdict["evidence"]), (0, ["block 1,134,720,010"]))
+        long_note = "block 1,134,720,010 " + "matches the fixture " * 20
+        code, verdict = self.run_cli(
+            "verdict", task, "--outcome", "held", "--evidence", "block 1,134,720,010", long_note
+        )
+        self.assertEqual((code, verdict["evidence"]), (0, ["block 1,134,720,010", long_note]))
         code, overturn = self.run_cli("overturn", task, "--redo-cost", "8", "--reason", "native diff")
         self.assertEqual(code, 0)
 
