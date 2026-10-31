@@ -89,6 +89,12 @@ class CliTests(unittest.TestCase):
         )
         _, probe = self.run_cli("select", "probe", "bounded", "--admit", "cheap")
         self.assertIn("evidence", self.run_cli("close", probe["task"], "--outcome", "held")[1]["error"])
+        close = ("close", probe["task"], "--outcome", "held", "--evidence", "a.txt", "--falsifier-checked")
+        code, answer = self.run_cli(*close, "some text")
+        self.assertEqual(code, 2)
+        self.assertIn("choose from 'true', 'false'", answer["error"])
+        self.assertEqual(self.run_cli(*close, "True")[0], 0)
+        self.assertIs(self.events()[-1]["falsifier_checked"], True)
 
     def test_a_deferred_task_closes_awaiting_and_takes_its_verdict(self):
         _, chosen = self.run_cli("select", "recon", "bounded", "--admit", "cheap")

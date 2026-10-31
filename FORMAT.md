@@ -99,7 +99,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `commits` | the commits the task landed, which the overturn rule needs to find the root task |
 | `claims` | optional claim ids the task touched, such as a reverse-engineering project's claim ids, by which an overturn is traced back |
 | `evidence` | optional: the primary artifacts the result rests on, a list of `{"path": .., "sha256": ..}` or free references. Required for investigations |
-| `falsifier_checked` | investigations: whether the falsifier named in the brief was checked, `true`, `false` or `null` |
+| `falsifier_checked` | investigations: whether the falsifier named in the brief was checked, `true` or `false` |
 | `report` | the path to the executor's report, so the score and judgement can be traced |
 
 `verdict`, deferred kinds: `outcome` (`held` or `corrected`), `score` or `yield`, `evidence`, the run of the authoritative check that decided it (such as a block height and a fixture hash), and `unresolved`, the branches left out. The evidence is what lets a later reader confirm that the open's `cases` were covered.

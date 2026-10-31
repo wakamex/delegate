@@ -357,7 +357,7 @@ def cmd_close(config, session, args, moment):
         }
     )
     if kind.investigation:
-        event["falsifier_checked"] = args.falsifier_checked
+        event["falsifier_checked"] = args.falsifier_checked == "true"
     return session.append(event)
 
 
@@ -533,7 +533,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--report")
     s.add_argument(
         "--falsifier-checked",
-        type=lambda v: {"true": True, "false": False}[v.lower()],
+        type=str.lower,
+        choices=("true", "false"),
         help="investigations: true or false",
     )
 
