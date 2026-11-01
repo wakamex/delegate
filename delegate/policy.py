@@ -24,7 +24,7 @@ class SelectError(Exception):
 class Env:
     """What select needs from outside the ledger, injectable for tests."""
 
-    pool: callable  # (target, dollars, need) -> {"room": bool, "catch_up": bool}
+    pool: callable  # (target, dollars, need) -> {"room": bool, "marginal": share of the run's dollars it costs}
     rng: random.Random
 
 
@@ -82,18 +82,11 @@ class Stats:
         return in_class if sum(t.final for t in in_class) >= CLASS_VERDICTS else self.of(actor)
 
     def _costs(self, tasks: list[Task], part: str) -> list[float]:
-        skip_catch_up = part == "actor"
-        return [c for t in tasks if (c := t.cost(part)) is not None and not (skip_catch_up and t.reason == "catch-up")]
+        return [c for t in tasks if (c := t.cost(part)) is not None]
 
     def actor_prior(self, actor: str) -> float | None:
         """The actor's own mean actor cost over all its tasks, else the kind's mean actor cost."""
-        own = [
-            c
-            for t in self.state.tasks.values()
-            if t.actor == actor
-            for c in [t.cost("actor")]
-            if c is not None and t.reason != "catch-up"
-        ]
+        own = [c for t in self.state.tasks.values() if t.actor == actor and (c := t.cost("actor")) is not None]
         if own:
             return mean(own)
         others = [t for t in self.tasks if (t.actor == LEAD) == (actor == LEAD)]
@@ -110,6 +103,11 @@ class Stats:
         redo_prior = mean([t.redo_cost for t in self.tasks if t.final]) or 0.0
         redo_part = shrunk([t.redo_cost for t in scope if t.final], redo_prior) or 0.0
         return actor_part, lead_part, redo_part
+
+    def marginal_cost(self, actor: str, cls: str, marginal: float = 1.0) -> float | None:
+        """Expected cost of one task with the actor's part priced at MARGINAL."""
+        actor_part, lead_part, redo_part = self.cost_parts(actor, cls)
+        return None if actor_part is None else actor_part * marginal + lead_part + redo_part
 
     def expected_cost(self, actor: str, cls: str) -> float | None:
         """Expected total cost of one task: shrunk actor, lead and redo costs."""
@@ -128,8 +126,11 @@ class Stats:
         prior = mean(per_success(self.tasks)) or 1.0
         return max(shrunk(per_success(self.of(actor)), prior), 1e-9)
 
-    def cost_per_success_draws(self, actor: str, cls: str, rng: random.Random, n: int = DRAWS) -> list[float]:
-        cost = self.expected_cost(actor, cls)
+    def cost_per_success_draws(
+        self, actor: str, cls: str, rng: random.Random, n: int = DRAWS, marginal: float = 1.0
+    ) -> list[float]:
+        """Draws of cost per success, the actor's part priced at MARGINAL, the share of it the run really spends."""
+        cost = self.marginal_cost(actor, cls, marginal)
         cost = 1.0 if cost is None else cost
         a, b = counts(self.final(actor), self.kind)
         factor = self.yield_factor(actor)
@@ -333,7 +334,7 @@ def select(
             "token_cap": token_cap,
             "expected": expected,
         }
-        for key in ("seed", "retry_of", "why"):
+        for key in ("seed", "retry_of", "why", "marginal"):
             if extra.get(key) is not None:
                 event[key] = extra[key]
         events.append(event)
@@ -371,7 +372,7 @@ def select(
 
     def pool_room(executor) -> dict:
         if not executor.pool:
-            return {"room": True, "catch_up": False}
+            return {"room": True, "marginal": 1.0}
         actor_part, lead_part, _ = stats.cost_parts(executor.name, cls)
         return check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
 
@@ -470,22 +471,24 @@ def select(
             eligible, key=lambda n: (stats.cost_per_success(n, cls) is None, stats.cost_per_success(n, cls) or 0, n)
         )
         return pick(ranked, "cheapest")
-    pool_reason = None
-    if kind.check == "gated":
-        catch_up = [n for n in eligible if rooms[n].get("catch_up")]
-        if catch_up:
-            eligible, pool_reason = catch_up, "catch-up"
+    # Quota due to expire unused costs nothing, so a run on a pool behind its pace is priced at its marginal share
+    # of the actor's cost, the success rate still counting; not on the lead's pool, whose quota the lead needs.
+    marginal = {
+        n: 1.0 if config.executors[n].pool == config.lead_pool else rooms[n].get("marginal", 1.0) for n in eligible
+    }
+    discounts = {n: round(m, 3) for n, m in marginal.items() if m < 1}
     untried = [n for n in eligible if not stats.of(n)]
     if untried:
         ranked = sorted(
-            untried, key=lambda n: (stats.expected_cost(n, cls) is None, stats.expected_cost(n, cls) or 0, n)
+            untried,
+            key=lambda n: (stats.expected_cost(n, cls) is None, stats.marginal_cost(n, cls, marginal[n]) or 0, n),
         )
-        return pick(ranked, pool_reason or "warm-up")
+        return answer("delegate", ranked[0], "warm-up", marginal=discounts or None)
     seed = env.rng.randrange(2**32)
     rng = random.Random(seed)
-    draws = {n: stats.cost_per_success_draws(n, cls, rng, 1)[0] for n in sorted(eligible)}
+    draws = {n: stats.cost_per_success_draws(n, cls, rng, 1, marginal[n])[0] for n in sorted(eligible)}
     best = min(draws, key=lambda n: (draws[n], n))
-    return answer("delegate", best, pool_reason or "draw", seed=seed, retry_of=retry)
+    return answer("delegate", best, "draw", seed=seed, retry_of=retry, marginal=discounts or None)
 
 
 def scorecard(config: Config, state: State, env: Env, only: str | None = None) -> list[dict]:

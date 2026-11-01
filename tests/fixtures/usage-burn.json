@@ -1,9 +1,9 @@
 {
-  "_source": "usage-burn --check output captured 2026-10-31 on the maintainer's machine, account ids zeroed",
+  "_source": "usage-burn --check output captured 2026-10-31 and 2026-11-01 on the maintainer's machine, account ids zeroed",
   "admitted": {
-    "command": "usage-burn --check opencode",
+    "command": "usage-burn --check cursor --need 1",
     "exit": 0,
-    "stdout": "{\"target\": \"opencode\", \"provider\": \"opencode\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"admitted\", \"admitted\": true, \"permanent\": false, \"reasons\": [], \"retry_after\": null, \"windows\": [{\"window\": \"Session (5h)\", \"paced\": false, \"used_pct\": 0.0, \"run_points\": 0.0, \"allowed_pct\": 100.0, \"accounts\": 1, \"resets_at\": null, \"pace\": null, \"burn\": null}, {\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 76.73239509999999, \"run_points\": 0.0, \"allowed_pct\": 98.8875, \"accounts\": 1, \"resets_at\": \"2026-11-02T00:00:00+00:00\", \"pace\": 0.9069826732108499, \"burn\": 1.5110631228284552}, {\"window\": \"Month (30d)\", \"paced\": true, \"used_pct\": 47.44566201666667, \"run_points\": 0.0, \"allowed_pct\": 54.9668, \"accounts\": 1, \"resets_at\": \"2026-11-15T10:22:13+00:00\", \"pace\": 0.9188939975266098, \"burn\": 1.0865842563407726}]}"
+    "stdout": "{\"target\": \"cursor\", \"provider\": \"cursor\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"admitted\", \"admitted\": true, \"permanent\": false, \"reasons\": [], \"retry_after\": null, \"windows\": [{\"window\": \"Month (30d)\", \"paced\": true, \"used_pct\": 3.2086720867208673, \"run_points\": 1.0, \"allowed_pct\": 31.9256, \"accounts\": 1, \"resets_at\": \"2026-11-23T17:30:37+00:00\", \"pace\": 0.1118011401476535, \"burn\": 1.3434934072949558}]}"
   },
   "refused": {
     "command": "usage-burn --check devin --need 40",

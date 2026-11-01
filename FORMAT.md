@@ -70,8 +70,9 @@ A task's record is its events folded in order: later fields replace earlier ones
 |---|---|
 | `kind`, `class` | from the config |
 | `actor` | an executor name from the config, or `"lead"` |
-| `reason` | `warm-up`, `draw`, `cheapest`, `catch-up`, `admit`, `assigned`, `lead` |
+| `reason` | `warm-up`, `draw`, `cheapest`, `admit`, `assigned`, `lead`; older events may say `catch-up` |
 | `seed` | the draw's seed, for `draw` |
+| `marginal` | for `warm-up` and `draw`: the executors whose pool had quota due to expire, each with the share of its actor cost the choice priced its run at |
 | `why` | for `assigned`: who chose the executor and why, in the lead's words |
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: 1}` for a counted one, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |

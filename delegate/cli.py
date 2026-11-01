@@ -23,7 +23,6 @@ AOP_RESULTS = STATE / "aop" / "results"
 # 1 or 3 for none and 2 for an error, such as usage-burn. Without one, pools are not checked.
 USAGE_BURN = os.environ.get("DELEGATE_USAGE_BURN") or shutil.which("usage-burn")
 SESSION_COST_SECONDS = 60
-CATCH_UP_HOURS = 24
 
 
 class UsageError(Exception):
@@ -43,7 +42,7 @@ def pool_check(target: str, dollars: float | None, need: float | None) -> dict:
     """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for:
     exit 0 room, 1 or 3 none, 2 an error."""
     if not USAGE_BURN:
-        return {"room": True, "catch_up": False, "state": "unchecked"}
+        return {"room": True, "marginal": 1.0, "state": "unchecked"}
     command = [USAGE_BURN, "--check", target]
     if dollars is not None:
         command += ["--cost", f"{dollars:.4f}"]
@@ -59,14 +58,25 @@ def pool_check(target: str, dollars: float | None, need: float | None) -> dict:
         result = json.loads(completed.stdout.splitlines()[-1])
     except (IndexError, json.JSONDecodeError) as exc:
         raise UsageError(f"usage-burn gave no JSON for {target}") from exc
-    moment = now()
-    catch_up = False
-    for window in result.get("windows") or []:
-        reset = window.get("resets_at")
-        if window.get("paced") and reset and window.get("pace") is not None and window["pace"] < 1:
-            if parse_time(reset) - moment <= timedelta(hours=CATCH_UP_HOURS):
-                catch_up = True
-    return {"room": completed.returncode == 0, "catch_up": catch_up, "state": result.get("state")}
+    return {
+        "room": completed.returncode == 0,
+        "marginal": marginal(result.get("windows") or []),
+        "state": result.get("state"),
+    }
+
+
+def marginal(windows: list[dict]) -> float:
+    """The share of a run's points that comes out of quota the pool would otherwise use: 0 when the run fits in
+    allowance due to expire unused, 1 at full price. A window used at average pace P (a multiple of the steady pace)
+    ends at 100 P percent, so 100 (1 - P) points of it expire; the window leaving the run the least of those binds.
+    A window without a pace yet, early in its period, gives no discount."""
+    shares = []
+    for window in windows:
+        if points := window.get("run_points"):
+            pace = window.get("pace")
+            expiring = 0.0 if pace is None else max(0.0, 100 * (1 - pace))
+            shares.append(max(0.0, points - expiring) / points)
+    return max(shares, default=1.0)
 
 
 def aop_models() -> list[dict]:

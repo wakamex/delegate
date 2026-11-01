@@ -74,8 +74,8 @@ class FakePools:
     """Pool room by target, as usage-burn's check gives it; a target nobody declared is a bug in the test and raises.
     BUDGET is the most dollars a target admits, and MAX_NEED the most points for a pool with no measured price."""
 
-    def __init__(self, rooms: dict[str, bool], catch_up=frozenset(), budget=None, max_need=None):
-        self.rooms, self.catch_up, self.calls = rooms, set(catch_up), []
+    def __init__(self, rooms: dict[str, bool], marginal=None, budget=None, max_need=None):
+        self.rooms, self.marginal, self.calls = rooms, marginal or {}, []
         self.budget, self.max_need = budget or {}, max_need or {}
 
     def __call__(self, target, dollars, need):
@@ -87,12 +87,12 @@ class FakePools:
         fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
             target not in self.max_need or (need or 0) <= self.max_need[target]
         )
-        return {"room": self.rooms[target] and fits, "catch_up": target in self.catch_up}
+        return {"room": self.rooms[target] and fits, "marginal": self.marginal.get(target, 1.0)}
 
 
-def env(rooms=None, catch_up=(), seed=1, budget=None, max_need=None) -> Env:
+def env(rooms=None, marginal=None, seed=1, budget=None, max_need=None) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, set(catch_up), budget, max_need), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, marginal, budget, max_need), rng=random.Random(seed))
 
 
 class Book:

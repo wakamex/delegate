@@ -309,13 +309,31 @@ class SelectionTests(unittest.TestCase):
         third, _ = choose(self.config, book, resources=["checkout", "memory=15"])
         self.assertEqual(third["resources"]["checkout"], "b")
 
-    def test_catch_up_sends_gated_work_to_an_expiring_pool(self):
-        book = Book()
-        for _ in range(3):
-            book.task("tool", "cheap", "held", cost=0.1)
-            book.task("tool", "dear", "held", cost=5.0)
-        result, _ = choose(self.config, book, e=env(catch_up={"dear-pool"}))
-        self.assertEqual((result["actor"], result["reason"]), ("dear", "catch-up"))
+    def test_quota_due_to_expire_discounts_a_pool_s_runs_without_forcing_them(self):
+        # Both hold 3 of 3; dear costs $5 a run against cheap's $1, plus $1 of the lead's cost each. With dear's
+        # pool far behind its pace its run costs only the lead's dollar, so it wins most draws but not all.
+        def wins(config, marginal, kind="tool"):
+            book = Book()
+            for actor in ("cheap", "dear"):
+                book.add(event="resume", actor=actor, kind=kind, reason="admitted")
+            for _ in range(3):
+                book.task(kind, "cheap", "held", cost=1, lead_cost=1, score=80 if kind == "port" else None)
+                book.task(kind, "dear", "held", cost=5, lead_cost=1, score=80 if kind == "port" else None)
+            results = [choose(config, book, kind=kind, e=env(marginal=marginal, seed=i)) for i in range(60)]
+            return sum(r["actor"] == "dear" for r, _ in results), results[0][1][-1]
+
+        full, _ = wins(self.config, None)
+        spare, event = wins(self.config, {"dear-pool": 0.0})
+        self.assertLess(full, 12)
+        self.assertTrue(30 < spare < 60, spare)
+        self.assertEqual(event["marginal"], {"dear": 0.0})
+        reviewed, _ = wins(self.config, {"dear-pool": 0.0}, kind="port")
+        self.assertGreater(reviewed, 30)
+        # The lead's own pool is never discounted: the lead needs its quota.
+        lead_pool = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))
+        on_lead, event = wins(lead_pool, {"lead-pool": 0.0})
+        self.assertLess(on_lead, 12)
+        self.assertNotIn("marginal", event)
 
     def test_deferred_kind_takes_the_cheapest_and_holds_one_task_before_a_verdict(self):
         book = Book()

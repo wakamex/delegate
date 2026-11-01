@@ -39,13 +39,21 @@ class PoolCheckTests(unittest.TestCase):
             result = cli.pool_check(*args)
         return result, json.loads(argv.read_text())
 
-    def test_admitted_and_its_catch_up_window(self):
-        result, argv = self.check("admitted", "opencode", 2.5, None)
-        self.assertEqual(result, {"room": True, "catch_up": False, "state": "admitted"})
-        self.assertEqual(argv, ["--check", "opencode", "--cost", "2.5000"])
-        # The week, paced under 1x, resets 2026-11-02 00:00: within a day of this moment it is catch-up.
-        late, _ = self.check("admitted", "opencode", None, None, now="2026-11-01T01:00:00+00:00")
-        self.assertTrue(late["catch_up"])
+    def test_admitted_and_priced_at_its_quota_due_to_expire(self):
+        # Cursor's month at 0.11x pace leaves about 89 points to expire, so a 1-point run there costs nothing.
+        result, argv = self.check("admitted", "cursor", None, 1.0)
+        self.assertEqual(result, {"room": True, "marginal": 0.0, "state": "admitted"})
+        self.assertEqual(argv, ["--check", "cursor", "--need", "1.0000"])
+
+    def test_the_window_leaving_a_run_the_least_expiring_quota_binds(self):
+        windows = [
+            {"run_points": 10, "pace": 0.5},  # 50 points expire: free
+            {"run_points": 10, "pace": 0.95},  # 5 expire: half the run is paid for
+            {"run_points": None, "pace": 0.1},  # no price for this window: no say
+        ]
+        self.assertAlmostEqual(cli.marginal(windows), 0.5)
+        self.assertEqual(cli.marginal([{"run_points": 4, "pace": None}]), 1.0)  # too early in the window to tell
+        self.assertEqual(cli.marginal([]), 1.0)
 
     def test_refused_and_unavailable_have_no_room(self):
         refused, argv = self.check("refused", "devin", None, 40.0)
