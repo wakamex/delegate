@@ -27,7 +27,7 @@ delegate close port-0007 --outcome held --score 60 --score-reason "bounded port,
 delegate scorecard port
 ```
 
-A `wait` answer names the busy resource or pool; try again later with `--since` set to the time it gave. A `lead` answer means the lead does the task itself, and records it the same way. Every command prints one JSON line and exits 0, or prints `{"error": ...}` and exits 2.
+A `wait` answer names the busy resource or pool, and under `refused` each otherwise eligible executor its pool check turned away, with the dollars it asked for, the check's state and its reasons; a wait opens nothing, so it can be asked as often as needed. Try again later with `--since` set to the time it gave. A `lead` answer means the lead does the task itself, and records it the same way. Every command prints one JSON line and exits 0, or prints `{"error": ...}` and exits 2.
 
 ## Limitations
 

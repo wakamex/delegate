@@ -62,6 +62,7 @@ def pool_check(target: str, dollars: float | None, need: float | None) -> dict:
         "room": completed.returncode == 0,
         "marginal": marginal(result.get("windows") or []),
         "state": result.get("state"),
+        "reasons": result.get("reasons") or ([result["error"]] if result.get("error") else []),
     }
 
 

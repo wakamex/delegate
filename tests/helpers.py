@@ -87,7 +87,13 @@ class FakePools:
         fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
             target not in self.max_need or (need or 0) <= self.max_need[target]
         )
-        return {"room": self.rooms[target] and fits, "marginal": self.marginal.get(target, 1.0)}
+        room = self.rooms[target] and fits
+        return {
+            "room": room,
+            "marginal": self.marginal.get(target, 1.0),
+            "state": "admitted" if room else "refused",
+            "reasons": [] if room else [f"{target} has no room"],
+        }
 
 
 def env(rooms=None, marginal=None, seed=1, budget=None, max_need=None) -> Env:

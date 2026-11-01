@@ -42,7 +42,7 @@ class PoolCheckTests(unittest.TestCase):
     def test_admitted_and_priced_at_its_quota_due_to_expire(self):
         # Cursor's month at 0.11x pace leaves about 89 points to expire, so a 1-point run there costs nothing.
         result, argv = self.check("admitted", "cursor", None, 1.0)
-        self.assertEqual(result, {"room": True, "marginal": 0.0, "state": "admitted"})
+        self.assertEqual(result, {"room": True, "marginal": 0.0, "state": "admitted", "reasons": []})
         self.assertEqual(argv, ["--check", "cursor", "--need", "1.0000"])
 
     def test_the_window_leaving_a_run_the_least_expiring_quota_binds(self):
@@ -58,6 +58,7 @@ class PoolCheckTests(unittest.TestCase):
     def test_refused_and_unavailable_have_no_room(self):
         refused, argv = self.check("refused", "devin", None, 40.0)
         self.assertEqual(refused["room"], False)
+        self.assertIn("Daily: 98% used leaves no room for 40 more", refused["reasons"])
         self.assertEqual(argv, ["--check", "devin", "--need", "40.0000"])
         unavailable, _ = self.check("unavailable", "zcode", None, None)
         self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))

@@ -273,6 +273,12 @@ class SelectionTests(unittest.TestCase):
         full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})
         result, events = choose(self.config, Book(), e=full)
         self.assertEqual((result["answer"], result["waiting_for"]), ("wait", "cheap-pool"))
+        # A wait names each executor its pool check refused, with what was asked and why.
+        self.assertEqual(
+            result["refused"]["dear"],
+            {"pool": "dear-pool", "dollars": None, "state": "refused", "reasons": ["dear-pool has no room"]},
+        )
+        self.assertEqual(set(result["refused"]), {"cheap", "dear"})
         self.assertFalse(events)
         later = choose(self.config, Book(), e=full, since=NOW - timedelta(minutes=61))[0]
         self.assertEqual(later["answer"], "lead")

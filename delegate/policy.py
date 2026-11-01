@@ -318,7 +318,8 @@ def select(
     def answer(kind_of_answer, actor=None, reason=None, **extra):
         result = {"answer": kind_of_answer, "kind": kind_name, "class": cls}
         if kind_of_answer == "wait":
-            return {**result, "waiting_for": extra["waiting_for"], "since": (since or now).isoformat()}, events
+            waiting = {**result, "waiting_for": extra["waiting_for"], "since": (since or now).isoformat()}
+            return ({**waiting, "refused": refused} if refused else waiting), events
         task_id = f"{kind_name}-{sum(t.kind == kind_name for t in state.tasks.values()) + 1:04d}"
         actor_part, lead_part, _ = stats.cost_parts(actor, cls)
         expected = {"actor_cost": actor_part, "lead_cost": None if actor == LEAD else lead_part}
@@ -368,7 +369,20 @@ def select(
             spent = pool_dollars(task.actor, expected.get("actor_cost"), expected.get("lead_cost"))
             dollars = spent if dollars is None else dollars + (spent or 0)
         need = config.pool_need.get(pool)
-        return env.pool(pool, dollars, None if need is None else need * (1 + len(going)))
+        need = None if need is None else need * (1 + len(going))
+        return {**env.pool(pool, dollars, need), "dollars": dollars, "need": need}
+
+    # Executors otherwise eligible whose pool check refused them, with what was asked and why, for a wait answer.
+    refused: dict[str, dict] = {}
+
+    def refuse(name: str, room: dict):
+        refused[name] = {
+            "pool": config.executors[name].pool,
+            "dollars": None if room.get("dollars") is None else round(room["dollars"], 2),
+            **({"need": room["need"]} if room.get("need") is not None else {}),
+            "state": room.get("state"),
+            "reasons": room.get("reasons") or [],
+        }
 
     def pool_room(executor) -> dict:
         if not executor.pool:
@@ -392,6 +406,7 @@ def select(
             return answer("wait", waiting_for=busy)
         room = pool_room(executor)
         if not room["room"]:
+            refuse(admit, room)
             return answer("wait", waiting_for=executor.pool)
         return answer("admit", admit, "admit")
 
@@ -447,6 +462,7 @@ def select(
     for name in list(eligible):
         rooms[name] = pool_room(config.executors[name])
         if not rooms[name]["room"]:
+            refuse(name, rooms[name])
             eligible.remove(name)
             pool_blocked.append(config.executors[name].pool)
     if not eligible:
