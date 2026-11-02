@@ -327,6 +327,28 @@ class SelectionTests(unittest.TestCase):
         third, _ = choose(self.config, book, resources=["checkout", "memory=15"])
         self.assertEqual(third["resources"]["checkout"], "b")
 
+    def test_a_counted_resource_reserves_the_slots_asked_for(self):
+        # A task that relaunches the live client holds all of it, since a relaunch ends every job on it.
+        config = make_config(BASE.replace("[resources]\n", "[resources]\nlive-client = 2\n"))
+        book = Book()
+        first, _ = choose(config, book, resources=["live-client"])
+        self.assertEqual(first["resources"], {"live-client": 1})
+        book.add(
+            event="open",
+            task="tool-0101",
+            kind="tool",
+            **{"class": "bounded"},
+            actor="dear",
+            reason="draw",
+            resources={"live-client": 1},
+        )
+        whole, _ = choose(config, book, resources=["live-client=2"])
+        self.assertEqual((whole["answer"], whole["waiting_for"]), ("wait", "live-client"))
+        self.assertEqual(choose(config, Book(), resources=["live-client=2"])[0]["resources"], {"live-client": 2})
+        for bad in ("live-client=3", "live-client=1.5", "checkout=2"):
+            with self.assertRaises(ConfigError):
+                choose(config, Book(), resources=[bad])
+
     def test_quota_due_to_expire_discounts_a_pool_s_runs_without_forcing_them(self):
         # Both hold 3 of 3; dear costs $5 a run against cheap's $1, plus $1 of the lead's cost each. With dear's
         # pool far behind its pace its run costs only the lead's dollar, so it wins most draws but not all.

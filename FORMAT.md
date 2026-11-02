@@ -42,7 +42,7 @@ measure = "lead-score"                   # "pass-fail", "yield" or "lead-score"
 classes = ["bounded", "first-reading", "redesign"]
 class_state = { redesign = "lead-only" } # overrides of the kind's state per class
 capabilities = []                        # every executor here must have these
-resources = ["checkout", "live-client"]  # what a task of this kind reserves by default; "host-memory-gb=16" reserves an amount
+resources = ["checkout", "live-client"]  # what a task of this kind reserves by default; "host-memory-gb=16" reserves an amount, "live-client=2" two slots
 investigation = false                    # true for a kind of bounded investigations
 ```
 
@@ -78,7 +78,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `marginal` | for `warm-up` and `draw`: the executors whose pool had quota due to expire, each with the share of its actor cost the choice priced its run at |
 | `why` | for `assigned`: who chose the executor and why, in the lead's words |
 | `retry_of` | the task this one retries, if any |
-| `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: 1}` for a counted one, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |
+| `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: SLOTS}` for a counted one, 1 unless more were asked for, such as all of a live client a relaunch would end every job on, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |
 | `token_cap` | the brief's cap |
 | `expected` | `{"actor_cost": .., "lead_cost": ..}` at selection, each the shrunk mean the choice used, without redo cost; events before November 2026 hold the whole expected cost in `actor_cost` and lead plus redo in `lead_cost`, and some carry `pool_points` |
 | `check`, `cases` | deferred kinds: the authoritative check that will close it and what it must cover |

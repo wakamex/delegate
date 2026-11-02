@@ -248,19 +248,24 @@ def reserve(config: Config, state: State, specs: list[str]) -> tuple[dict | None
             raise ConfigError(f"unknown resource {name!r}")
         taken = held.get(name, [])
         if resource.instances:
+            if amount is not None:
+                raise ConfigError(f"{name} has named instances, one task each; {spec!r} asks for an amount")
             free = [i for i in resource.instances if i not in taken]
             if not free:
                 return None, name
             reservation[name] = free[0]
-        elif resource.amounts:
-            need = amount if amount is not None else 1.0
-            if sum(float(v) for v in taken) + need > resource.capacity:
-                return None, name
-            reservation[name] = need
-        else:
-            if len(taken) + 1 > resource.capacity:
-                return None, name
-            reservation[name] = 1
+            continue
+        # A counted resource takes whole slots, such as all of a live client a relaunch would end every job on.
+        need = amount if amount is not None else 1.0
+        if not resource.amounts:
+            if need != int(need):
+                raise ConfigError(f"{name} is counted in whole slots; {spec!r} asks for part of one")
+            need = int(need)
+        if need > resource.capacity:
+            raise ConfigError(f"{spec!r} asks for more than {name}'s capacity of {resource.capacity:g}")
+        if sum(float(v) for v in taken) + need > resource.capacity:
+            return None, name
+        reservation[name] = need
     return reservation, None
 
 
