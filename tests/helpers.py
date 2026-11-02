@@ -81,11 +81,12 @@ class FakePools:
     def __call__(self, target, dollars, need):
         if target not in self.rooms:
             raise AssertionError(f"pool check for undeclared target {target!r}")
-        if (dollars is not None and dollars < 0) or (need is not None and need < 0):
+        needs = list(need.values()) if isinstance(need, dict) else [need or 0]
+        if (dollars is not None and dollars < 0) or min(needs) < 0:
             raise AssertionError("negative cost")
         self.calls.append((target, None if dollars is None else round(dollars, 6), need))
         fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
-            target not in self.max_need or (need or 0) <= self.max_need[target]
+            target not in self.max_need or max(needs) <= self.max_need[target]
         )
         room = self.rooms[target] and fits
         return {

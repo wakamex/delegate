@@ -35,6 +35,9 @@ class ConfigTests(unittest.TestCase):
             BASE + "\n[pools.cheap-pool]\ndollars_per_point = 2\n",
             BASE + "\n[pools.cheap-pool]\nneeds = 40\n",
             BASE + "\n[pools.cheap-pool]\nneed = -1\n",
+            BASE + '\n[pools.cheap-pool]\nneed = { "1w" = 25 }\n',
+            BASE + '\n[pools.cheap-pool]\nneed = { "7d" = -1 }\n',
+            BASE + "\n[pools.cheap-pool]\nneed = {}\n",
         ):
             with self.assertRaises(ConfigError):
                 make_config(bad)
@@ -122,6 +125,15 @@ class SelectionTests(unittest.TestCase):
         result, _ = choose(config, book, e=pools)
         self.assertEqual(result["actor"], "dear")
         self.assertIn(("cheap-pool", 9.0, 80.0), pools.pool.calls)
+
+    def test_a_need_per_window_is_asked_for_each_run_in_each_window(self):
+        config = make_config(BASE + '\n[pools.cheap-pool]\nneed = { "7d" = 25, "30d" = 6 }\n')
+        book = Book()
+        book.task("tool", "dear", "held", cost=5)
+        self.going(book)
+        pools = env()
+        choose(config, book, e=pools)
+        self.assertIn(("cheap-pool", 9.0, {"7d": 50.0, "30d": 12.0}), pools.pool.calls)
 
     def test_a_run_on_the_lead_s_pool_carries_its_lead_cost_too(self):
         config = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))

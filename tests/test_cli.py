@@ -63,6 +63,13 @@ class PoolCheckTests(unittest.TestCase):
         unavailable, _ = self.check("unavailable", "zcode", None, None)
         self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))
 
+    def test_a_need_per_window_length_is_passed_as_one_option(self):
+        # OpenCode's week just reset, so 25 points of it is over the day's lead; 6 of its half-used month fits.
+        result, argv = self.check("refused-per-window", "opencode", None, {"5h": 25.0, "7d": 25.0, "30d": 6.0})
+        self.assertEqual(argv, ["--check", "opencode", "--need", "5h=25.0000,7d=25.0000,30d=6.0000"])
+        self.assertEqual(result["room"], False)
+        self.assertEqual([r.split(":")[0] for r in result["reasons"]], ["Week (7d)"])
+
     def test_a_check_that_cannot_be_made_is_an_error(self):
         with self.assertRaisesRegex(cli.UsageError, "name one of Claude and GPT, Gemini as :SCOPE"):
             self.check("error", "agy", None, None)

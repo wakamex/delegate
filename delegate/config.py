@@ -63,7 +63,8 @@ class Config:
     resources: dict[str, Resource]
     executors: dict[str, Executor]
     kinds: dict[str, Kind]
-    pool_need: dict[str, float] = field(default_factory=dict)
+    # Points a run takes of a pool with no measured price: one number for every window, or one per window length.
+    pool_need: dict[str, float | dict[str, float]] = field(default_factory=dict)
     candidate_families: list[str] = field(default_factory=list)
 
     @property
@@ -96,6 +97,18 @@ def _number(value, where, minimum=0.0) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float) or value < minimum:
         raise ConfigError(f"{where} must be a number of at least {minimum:g}")
     return float(value)
+
+
+def _need(value, where) -> float | dict[str, float]:
+    """A pool's need: a number for every window, or a table from window length, such as "7d" or "5h", to points."""
+    if not isinstance(value, dict):
+        return _number(value, where)
+    if not value:
+        raise ConfigError(f"{where} names no window")
+    for length in value:
+        if not re.fullmatch(r"\d+(\.\d+)?[hd]", length):
+            raise ConfigError(f'{where} has window length {length!r}; write it like "5h" or "7d"')
+    return {length: _number(points, f"{where}.{length}") for length, points in value.items()}
 
 
 KIND_KEYS = {
@@ -231,7 +244,7 @@ def load(path: Path) -> Config:
         _known(value, {"need"}, f"pools.{name}")
         if "need" not in value:
             raise ConfigError(f"pools.{name} sets nothing")
-        pool_need[name] = _number(value["need"], f"pools.{name}.need")
+        pool_need[name] = _need(value["need"], f"pools.{name}.need")
     return Config(
         path=path,
         project=data["project"],

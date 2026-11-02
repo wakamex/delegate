@@ -19,8 +19,9 @@ from delegate.policy import LEAD, Env, SelectError
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "delegate"
 AOP_RESULTS = STATE / "aop" / "results"
-# The pool check: a command taking --check TARGET [--need N] that prints one JSON line and exits 0 for room,
-# 1 or 3 for none and 2 for an error, such as usage-burn. Without one, pools are not checked.
+# The pool check: a command taking --check TARGET [--cost DOLLARS] [--need N | --need 7d=N,30d=M] that prints
+# one JSON line and exits 0 for room, 1 or 3 for none and 2 for an error, such as usage-burn. Without one,
+# pools are not checked.
 USAGE_BURN = os.environ.get("DELEGATE_USAGE_BURN") or shutil.which("usage-burn")
 SESSION_COST_SECONDS = 60
 
@@ -38,16 +39,20 @@ def now() -> datetime:
 # ---- what select and close need from outside the ledger ------------------------------------------
 
 
-def pool_check(target: str, dollars: float | None, need: float | None) -> dict:
-    """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for:
-    exit 0 room, 1 or 3 none, 2 an error."""
+def pool_check(target: str, dollars: float | None, need: float | dict[str, float] | None) -> dict:
+    """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for,
+    one number for every window or one per window length: exit 0 room, 1 or 3 none, 2 an error."""
     if not USAGE_BURN:
         return {"room": True, "marginal": 1.0, "state": "unchecked"}
     command = [USAGE_BURN, "--check", target]
     if dollars is not None:
         command += ["--cost", f"{dollars:.4f}"]
     if need is not None:
-        command += ["--need", f"{need:.4f}"]
+        parts = need.items() if isinstance(need, dict) else [(None, need)]
+        command += [
+            "--need",
+            ",".join(f"{length}={points:.4f}" if length else f"{points:.4f}" for length, points in parts),
+        ]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:

@@ -368,8 +368,11 @@ def select(
             expected = task.open.get("expected") or {}
             spent = pool_dollars(task.actor, expected.get("actor_cost"), expected.get("lead_cost"))
             dollars = spent if dollars is None else dollars + (spent or 0)
-        need = config.pool_need.get(pool)
-        need = None if need is None else need * (1 + len(going))
+        need, runs = config.pool_need.get(pool), 1 + len(going)
+        if isinstance(need, dict):
+            need = {length: points * runs for length, points in need.items()}
+        elif need is not None:
+            need *= runs
         return {**env.pool(pool, dollars, need), "dollars": dollars, "need": need}
 
     # Executors otherwise eligible whose pool check refused them, with what was asked and why, for a wait answer.
