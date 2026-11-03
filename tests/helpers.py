@@ -71,8 +71,9 @@ def make_config(text: str = BASE, directory: Path | None = None):
 
 
 class FakePools:
-    """Pool room by target, as usage-burn's check gives it; a target nobody declared is a bug in the test and raises.
-    BUDGET is the most dollars a target admits, and MAX_NEED the most points for a pool with no measured price."""
+    """Pool room by target, as usage-burn's check gives it: True, False, or "error" for a check that could not
+    answer. A target nobody declared is a bug in the test and raises. BUDGET is the most dollars a target admits,
+    and MAX_NEED the most points for a pool with no measured price."""
 
     def __init__(self, rooms: dict[str, bool], marginal=None, budget=None, max_need=None):
         self.rooms, self.marginal, self.calls = rooms, marginal or {}, []
@@ -88,6 +89,8 @@ class FakePools:
         fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
             target not in self.max_need or max(needs) <= self.max_need[target]
         )
+        if self.rooms[target] == "error":
+            return {"room": False, "marginal": 1.0, "state": "error", "reasons": [f"could not check {target}"]}
         room = self.rooms[target] and fits
         return {
             "room": room,

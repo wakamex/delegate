@@ -324,6 +324,9 @@ def select(
         result = {"answer": kind_of_answer, "kind": kind_name, "class": cls}
         if kind_of_answer == "wait":
             waiting = {**result, "waiting_for": extra["waiting_for"], "since": (since or now).isoformat()}
+            # A pool check that could not answer is a failure to fix, not quota to wait for.
+            if failures := [r for room in refused.values() if room["state"] == "error" for r in room["reasons"]]:
+                waiting = {**waiting, "answer": "error", "error": "; ".join(dict.fromkeys(failures))}
             return ({**waiting, "refused": refused} if refused else waiting), events
         task_id = f"{kind_name}-{sum(t.kind == kind_name for t in state.tasks.values()) + 1:04d}"
         actor_part, lead_part, _ = stats.cost_parts(actor, cls)
@@ -380,12 +383,13 @@ def select(
             need *= runs
         return {**env.pool(pool, dollars, need), "dollars": dollars, "need": need}
 
-    # Executors otherwise eligible whose pool check refused them, with what was asked and why, for a wait answer.
+    # Executors otherwise eligible, and the lead past the wait deadline, whose pool check refused them, with what
+    # was asked and why, for a wait answer.
     refused: dict[str, dict] = {}
 
     def refuse(name: str, room: dict):
         refused[name] = {
-            "pool": config.executors[name].pool,
+            "pool": config.lead_pool if name == LEAD else config.executors[name].pool,
             "dollars": None if room.get("dollars") is None else round(room["dollars"], 2),
             **({"need": room["need"]} if room.get("need") is not None else {}),
             "state": room.get("state"),
@@ -482,6 +486,7 @@ def select(
                 )
                 if lead_room["room"]:
                     return lead()
+                refuse(LEAD, lead_room)
             return answer("wait", waiting_for=busy or sorted(set(pool_blocked))[0])
         return lead()
     if busy:

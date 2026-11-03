@@ -297,6 +297,22 @@ class SelectionTests(unittest.TestCase):
         no_lead = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": False})
         self.assertEqual(choose(self.config, Book(), e=no_lead, since=NOW - timedelta(minutes=61))[0]["answer"], "wait")
 
+    def test_a_pool_check_that_cannot_answer_is_an_error_not_a_wait(self):
+        # Another pool with room is still chosen from.
+        result, _ = choose(
+            self.config, Book(), e=env(rooms={"cheap-pool": "error", "dear-pool": True, "lead-pool": True})
+        )
+        self.assertEqual(result["answer"], "delegate")
+        failing = env(rooms={"cheap-pool": "error", "dear-pool": False, "lead-pool": True})
+        result, events = choose(self.config, Book(), e=failing)
+        self.assertEqual((result["answer"], result["error"]), ("error", "could not check cheap-pool"))
+        self.assertEqual(result["refused"]["dear"]["state"], "refused")
+        self.assertFalse(events)
+        # Past the deadline, a lead pool that cannot be checked is named too.
+        failing = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": "error"})
+        result, _ = choose(self.config, Book(), e=failing, since=NOW - timedelta(minutes=61))
+        self.assertEqual((result["answer"], result["refused"]["lead"]["pool"]), ("error", "lead-pool"))
+
     def test_the_lead_fallback_counts_the_runs_already_going_on_the_lead_s_pool(self):
         # dear runs on the lead's pool and has a $4 port going there, with $1 of lead cost, which the lead's own
         # run must leave room for.

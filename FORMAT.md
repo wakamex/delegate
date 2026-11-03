@@ -122,7 +122,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 | Command | Writes | Does |
 |---|---|---|
-| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `admit`, `wait` or `lead` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured |
+| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `admit`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured. An `error` answer is a wait in which a pool check could not answer, with the failure in `error`, and exits 2 |
 | `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | |
 | `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript |
 | `delegate verdict TASK --outcome ..` | `verdict` | |

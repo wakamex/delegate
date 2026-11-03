@@ -41,7 +41,17 @@ def now() -> datetime:
 
 def pool_check(target: str, dollars: float | None, need: float | dict[str, float] | None) -> dict:
     """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for,
-    one number for every window or one per window length: exit 0 room, 1 or 3 none, 2 an error."""
+    one number for every window or one per window length: exit 0 room, 1 or 3 none, 2 an error. A check that
+    cannot answer gives no room with state "error", so the other pools can still be chosen from."""
+
+    def failed(reason: str) -> dict:
+        return {
+            "room": False,
+            "marginal": 1.0,
+            "state": "error",
+            "reasons": [f"usage-burn could not check {target}: {reason}"],
+        }
+
     if not USAGE_BURN:
         return {"room": True, "marginal": 1.0, "state": "unchecked"}
     command = [USAGE_BURN, "--check", target]
@@ -56,13 +66,13 @@ def pool_check(target: str, dollars: float | None, need: float | dict[str, float
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UsageError(f"usage-burn could not check {target}: {exc}") from exc
-    if completed.returncode == 2:
-        raise UsageError(f"usage-burn could not check {target}: {completed.stdout.strip() or completed.stderr.strip()}")
+        return failed(str(exc))
     try:
         result = json.loads(completed.stdout.splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise UsageError(f"usage-burn gave no JSON for {target}") from exc
+    except (IndexError, json.JSONDecodeError):
+        result = None
+    if completed.returncode == 2 or not isinstance(result, dict):
+        return failed((result or {}).get("error") or completed.stdout.strip() or completed.stderr.strip() or "no JSON")
     return {
         "room": completed.returncode == 0,
         "marginal": marginal(result.get("windows") or []),
@@ -609,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "select" and not USAGE_BURN:
             result = {**result, "pool_check": "skipped: no usage-burn on PATH and no DELEGATE_USAGE_BURN"}
         print(json.dumps(result, default=str))
-        return 0
+        return 2 if result.get("answer") == "error" else 0
     except (UsageError, ConfigError, LedgerError, SelectError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 2

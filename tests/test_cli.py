@@ -70,9 +70,18 @@ class PoolCheckTests(unittest.TestCase):
         self.assertEqual(result["room"], False)
         self.assertEqual([r.split(":")[0] for r in result["reasons"]], ["Week (7d)"])
 
-    def test_a_check_that_cannot_be_made_is_an_error(self):
-        with self.assertRaisesRegex(cli.UsageError, "name one of Claude and GPT, Gemini as :SCOPE"):
-            self.check("error", "agy", None, None)
+    def test_a_check_that_cannot_be_made_has_no_room_and_says_why(self):
+        result, _ = self.check("error", "agy", None, None)
+        self.assertEqual((result["room"], result["state"]), (False, "error"))
+        self.assertIn("name one of Claude and GPT, Gemini as :SCOPE", result["reasons"][0])
+        late = subprocess.TimeoutExpired(["usage-burn"], 60)
+        with (
+            mock.patch.object(cli, "USAGE_BURN", "usage-burn"),
+            mock.patch.object(cli.subprocess, "run", side_effect=late),
+        ):
+            result = cli.pool_check("claude", 18.59, None)
+        self.assertEqual((result["room"], result["state"]), (False, "error"))
+        self.assertIn("timed out after 60 seconds", result["reasons"][0])
 
 
 class CliTests(unittest.TestCase):
