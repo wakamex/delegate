@@ -430,10 +430,13 @@ def select(
             raise SelectError("--assign and --admit cannot be combined")
         if not why:
             raise SelectError("an assignment needs --why, the user's or lead's reason")
-        if (position := standing(stats, assign)) != "admitted":
+        if (position := standing(stats, assign)) in ("candidate", "trial"):
             raise SelectError(
-                f"{assign} is {position} in {kind_name}; assign an admitted executor, or --admit a new one"
+                f"{assign} is {position} in {kind_name}: its tasks are admission trials, so give it this one "
+                f"with --admit {assign}"
             )
+        if position != "admitted":
+            raise SelectError(f"{assign} is {position} in {kind_name}; assign an admitted executor")
         if not set(kind.capabilities) <= set(executor.capabilities):
             raise SelectError(
                 f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(executor.capabilities))}"

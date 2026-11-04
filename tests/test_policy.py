@@ -278,7 +278,8 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(full.pool.calls)
         with self.assertRaisesRegex(policy.SelectError, "needs --why"):
             choose(self.config, Book(), kind="tool", assign="dear")
-        with self.assertRaisesRegex(policy.SelectError, "candidate in port"):
+        # A task for an executor not yet admitted is one of its admission trials, given with --admit.
+        with self.assertRaisesRegex(policy.SelectError, "candidate in port.*--admit dear"):
             choose(self.config, Book(), kind="port", assign="dear", why="lead")
 
     def test_wait_while_pools_are_full_then_the_lead_after_the_deadline(self):

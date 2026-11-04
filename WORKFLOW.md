@@ -96,7 +96,7 @@ An executor is eligible when all of these hold:
 The choice is one of four answers:
 
 - delegate to an executor, drawn by the rules below or assigned: the user or lead names an admitted executor with the reason, which skips the draw and the pool check but still waits for a busy resource. Warm-up keeps choosing executors with no task in a kind yet, so without an assignment a run the user had already given to one executor could only start outside the ledger;
-- admit: give the task to a candidate the lead names as an admission trial, a lowest-class task in a reviewed kind, or the calibration and then a bounded live task in a deferred kind, with the lead's cost of building the calibration on the admit record;
+- admit: give the task to a candidate or an executor on trial, whichever the lead names, as one of its admission trials, a lowest-class task in a reviewed kind, or the calibration and then a bounded live task in a deferred kind, with the lead's cost of building the calibration on the admit record;
 - wait, naming the resource or pool that is busy, when every otherwise eligible executor is blocked only by a reservation or by its pool's pace. A wait has a deadline the project sets; after it the task goes to the lead if the lead's own pool has room, and otherwise keeps waiting. Claude and Codex were once both over pace for more than a day while the simulator port's lead ran on Claude, which is why the fallback checks the lead's pool;
 - lead, when the kind or class is off, no executor is admitted or eligible for a reason other than a busy resource or pool, or step 2 applies.
 
