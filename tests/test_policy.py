@@ -255,6 +255,15 @@ class SelectionTests(unittest.TestCase):
             standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
         )
 
+    def test_an_amend_changes_only_what_it_may_and_only_on_a_closed_task(self):
+        book = Book()
+        task = book.task("tool", "cheap", "held", cost=0)
+        book.add(event="amend", task=task, changes={"cost.actor": {"old": 0, "new": 0.99}})
+        self.assertEqual(book.state().tasks[task].cost("actor"), 0.99)
+        book.add(event="amend", task=task, changes={"outcome": {"old": "held", "new": "corrected"}})
+        with self.assertRaisesRegex(LedgerError, "which an amend cannot change"):
+            book.state()
+
     def test_a_suspend_event_takes_an_executor_out_of_the_kind_until_resumed(self):
         # As when a provider locks an account for hours where the pool check cannot see it.
         book = Book()

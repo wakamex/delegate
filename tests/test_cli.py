@@ -136,6 +136,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(closed["minutes"]["run"], 10.0)
         self.assertEqual([e["event"] for e in self.events()], ["open", "started", "close"])
 
+    def test_amend_corrects_a_closed_task_and_the_record_uses_it(self):
+        # As in w3sim, where port-0110 was closed with --actor-cost 0 though its aop run cost $0.99.
+        _, chosen = self.run_cli("select", "tool", "bounded")
+        task = chosen["task"]
+        run = json.loads(FIXTURE.read_text())
+        (self.results / f"{run['run_id']}.json").write_text(FIXTURE.read_text())
+        self.run_cli("started", task, "--aop-run", run["run_id"])
+        self.run_cli("close", task, "--outcome", "held", "--actor-cost", "0", "--lead-cost", "0.5")
+        code, amend = self.run_cli("amend", task, "--from-aop", "--reason", "closed with a mistyped cost")
+        self.assertEqual(code, 0)
+        self.assertEqual(amend["changes"]["cost.actor"], {"old": 0.0, "new": 2.5})
+        self.assertEqual((amend["by"], amend["reason"]), ("lead", "closed with a mistyped cost"))
+        folded = cli.Ledger(self.directory / "ledger.jsonl").read().tasks[task]
+        self.assertEqual((folded.cost("actor"), folded.cost("lead")), (2.5, 0.5))
+        self.assertEqual(folded.close["minutes"]["run"], 10.0)
+        code, commits = self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "missed commits")
+        self.assertEqual(commits["changes"], {"commits": {"old": [], "new": ["abc123", "def456"]}})
+        self.assertEqual(self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "again")[0], 2)
+        _, other = self.run_cli("select", "tool", "bounded")
+        self.assertIn(
+            "not closed", self.run_cli("amend", other["task"], "--actor-cost", "1", "--reason", "x")[1]["error"]
+        )
+
     def test_repeated_list_options_append(self):
         _, chosen = self.run_cli("select", "tool", "bounded")
         code, closed = self.run_cli(

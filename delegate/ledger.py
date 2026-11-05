@@ -8,7 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 SCHEMA = "delegate-event-1"
-TASK_EVENTS = ("open", "started", "close", "verdict")
+TASK_EVENTS = ("open", "started", "close", "verdict", "amend")
+# The fields of a close an amend may correct, by path; an outcome or score is changed by an overturn or verdict.
+AMENDABLE = ("cost.actor", "cost.lead", "minutes.run", "aop_runs", "commits", "report")
 OTHER_EVENTS = ("overturn", "suspend", "resume", "drop")
 OUTCOMES = ("held", "steered", "corrected", "aborted", "awaiting")
 FINAL = ("held", "steered", "corrected")
@@ -130,7 +132,25 @@ def fold(events: list[dict]) -> State:
             task.close = event
         elif kind == "verdict":
             task.verdict = event
+        elif kind == "amend":
+            if task.close is None:
+                raise LedgerError(f"line {number} amends {task.id}, which is not closed")
+            task.close = amended(task.close, event.get("changes") or {}, number)
     return state
+
+
+def amended(close: dict, changes: dict, number: int) -> dict:
+    """A copy of CLOSE with each changed field set to its new value."""
+    close = dict(close)
+    for path, change in changes.items():
+        if path not in AMENDABLE:
+            raise LedgerError(f"line {number} amends {path}, which an amend cannot change")
+        head, _, leaf = path.partition(".")
+        if leaf:
+            close[head] = {**(close.get(head) or {}), leaf: change["new"]}
+        else:
+            close[head] = change["new"]
+    return close
 
 
 class Ledger:

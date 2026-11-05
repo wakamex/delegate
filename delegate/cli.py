@@ -439,6 +439,52 @@ def cmd_overturn(config, session, args, moment):
     )
 
 
+def cmd_amend(config, session, args, moment):
+    """Correct fields of a closed task, recording each old and new value."""
+    task = _task(session, args.task)
+    if not task.close:
+        raise UsageError(f"{task.id} is not closed; give the values to close")
+    new = {
+        "cost.actor": args.actor_cost,
+        "cost.lead": args.lead_cost,
+        "minutes.run": args.run_minutes,
+        "aop_runs": args.aop_run,
+        "commits": args.commit,
+        "report": args.report,
+    }
+    new = {path: value for path, value in new.items() if value is not None}
+    if args.from_aop:
+        runs = new.get("aop_runs", task.close.get("aop_runs") or [])
+        results = [ENV["aop_result"](r) for r in runs]
+        if not runs or not all(results):
+            raise UsageError(f"aop has no archived result for every run of {task.id}: {', '.join(runs) or 'none'}")
+        new.setdefault(
+            "cost.actor", sum(float((r.get("calculated_cost") or {}).get("amount_usd") or 0) for r in results)
+        )
+        new.setdefault("minutes.run", sum(float(r.get("duration_seconds") or 0) for r in results) / 60)
+    if not new:
+        raise UsageError("amend needs a field to correct, or --from-aop")
+
+    def old(path):
+        head, _, leaf = path.partition(".")
+        value = task.close.get(head)
+        return (value or {}).get(leaf) if leaf else value
+
+    changes = {path: {"old": old(path), "new": value} for path, value in new.items() if old(path) != value}
+    if not changes:
+        raise UsageError(f"{task.id} already records these values")
+    return session.append(
+        {
+            "event": "amend",
+            "at": moment.isoformat(),
+            "task": task.id,
+            "by": args.by,
+            "reason": args.reason,
+            "changes": changes,
+        }
+    )
+
+
 def cmd_actor_event(config, session, args, moment):
     if args.kind not in config.kinds:
         raise UsageError(f"unknown kind {args.kind!r}")
@@ -507,6 +553,7 @@ COMMANDS = {
     "close": cmd_close,
     "verdict": cmd_verdict,
     "overturn": cmd_overturn,
+    "amend": cmd_amend,
     "suspend": cmd_actor_event,
     "resume": cmd_actor_event,
     "drop": cmd_actor_event,
@@ -581,6 +628,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--redo-cost", type=float, required=True)
     s.add_argument("--reason", required=True)
     s.add_argument("--found-by", metavar="TASK")
+
+    s = sub.add_parser("amend", help="correct a closed task's costs, minutes, runs, commits or report")
+    s.add_argument("task")
+    s.add_argument("--reason", required=True)
+    s.add_argument("--by", default="lead", help="who made the correction (default: lead)")
+    s.add_argument("--actor-cost", type=float)
+    s.add_argument("--lead-cost", type=float)
+    s.add_argument("--run-minutes", type=float)
+    s.add_argument("--aop-run", nargs="+", action="extend", help="the task's aop runs, replacing the recorded list")
+    s.add_argument("--commit", nargs="+", action="extend", help="the task's commits, replacing the recorded list")
+    s.add_argument("--report")
+    s.add_argument("--from-aop", action="store_true", help="actor cost and run minutes from aop's records of its runs")
 
     for name in ("suspend", "resume", "drop"):
         s = sub.add_parser(name, help=f"{name} an executor in a kind")
