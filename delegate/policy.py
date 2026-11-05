@@ -184,6 +184,9 @@ def standing(stats: Stats, actor: str) -> str:
     dropped = last_time(_events(state, "drop", kind.name, actor))
     if dropped and (resumed is None or dropped > resumed):
         return "dropped"
+    suspended = last_time(_events(state, "suspend", kind.name, actor))
+    if suspended and (resumed is None or suspended > resumed):
+        return "suspended"
     if kind.check != "gated":
         for task in stats.final(actor):
             if task.defect == "integrity" and (resumed is None or judged_at(task) > resumed):

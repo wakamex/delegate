@@ -234,6 +234,21 @@ class SelectionTests(unittest.TestCase):
             standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
         )
 
+    def test_a_suspend_event_takes_an_executor_out_of_the_kind_until_resumed(self):
+        # As when a provider locks an account for hours where the pool check cannot see it.
+        book = Book()
+        book.add(event="suspend", actor="cheap", kind="tool", reason="rate limit until 12:11 UTC")
+        tool = self.config.kinds["tool"]
+        self.assertEqual(standing(Stats(self.config, book.state(), tool, env()), "cheap"), "suspended")
+        for _ in range(5):
+            result, _ = choose(self.config, book)
+            self.assertEqual(result["actor"], "dear")
+        self.assertEqual(
+            standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
+        )
+        book.add(event="resume", actor="cheap", kind="tool", reason="limit reset")
+        self.assertEqual(standing(Stats(self.config, book.state(), tool, env()), "cheap"), "active")
+
     def test_a_new_executor_takes_one_task_of_any_class_then_waits_for_its_verdict(self):
         # No trial and no class ladder: a configured executor warms up on whatever class comes, first-reading here,
         # and takes no second task in the kind until the first is judged.

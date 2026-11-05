@@ -116,7 +116,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 ### Actor and kind events
 
-`suspend`, `resume`, `drop`: `actor`, `kind`, `reason`.
+`suspend`, `resume`, `drop`: `actor`, `kind`, `reason`. A suspend or drop takes the executor out of the kind until a later resume, as an integrity correction in a reviewed or deferred kind also does; a lead suspends an executor whose provider has locked it in a way the pool check cannot see, such as Devin's free-model rate limit.
 
 
 ## Commands
