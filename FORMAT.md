@@ -109,7 +109,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 `verdict`, deferred kinds: `outcome` (`held` or `corrected`), `score` or `yield`, `evidence`, the run of the authoritative check that decided it (such as a block height and a fixture hash), and `unresolved`, the branches left out. The evidence is what lets a later reader confirm that the open's `cases` were covered.
 
-`amend`: corrects a closed task's `cost.actor`, `cost.lead`, `minutes.run`, `aop_runs`, `commits` or `report`, such as a cost mistyped at close. It holds `changes`, each field's path with its `old` and `new` value, `by` (who corrected it, `lead` unless named) and `reason`. Folding sets each field to its new value, so the scorecard, the draw and the drop rule use it. An outcome or score is not amended: an overturn marks a success wrong later, and a deferred kind's verdict decides its outcome.
+`amend`: corrects a closed task's `cost.actor`, `cost.lead`, `minutes.run`, `aop_runs`, `commits`, `report`, `score.value` or `score.reason`, such as a cost or score mistyped at close. It holds `changes`, each field's path with its `old` and `new` value, `by` (who corrected it, `lead` unless named) and `reason`. Folding sets each field to its new value, so the scorecard, the draw and the drop rule use it. An outcome is not amended: an overturn marks a success wrong later, and a deferred kind's verdict decides its outcome and holds its score. A score is given before the lead reads the cost, so an amend of it is for a slip, its reason saying what was mistyped, and the scorecard counts each actor's rescored tasks.
 
 `overturn`: `root` (the task whose commit introduced the overturned code), `redo_cost`, `reason`. Folding sets the root's outcome to corrected and its score and yield to zero.
 
@@ -131,9 +131,9 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript |
 | `delegate verdict TASK --outcome ..` | `verdict` | |
 | `delegate overturn ROOT --redo-cost N --reason .. [--found-by TASK]` | `overturn` | ROOT is the task whose commit introduced the overturned code |
-| `delegate amend TASK --reason .. [--actor-cost N] [--lead-cost N] [--run-minutes N] [--aop-run ID..] [--commit SHA..] [--report PATH] [--from-aop] [--by WHO]` | `amend` | corrects a closed task's fields, recording each old and new value; `--from-aop` refills actor cost and run minutes from aop's records of its runs; a list option replaces the recorded list |
+| `delegate amend TASK --reason .. [--actor-cost N] [--lead-cost N] [--run-minutes N] [--aop-run ID..] [--commit SHA..] [--report PATH] [--score N] [--score-reason ..] [--from-aop] [--by WHO]` | `amend` | corrects a closed task's fields, recording each old and new value; `--from-aop` refills actor cost and run minutes from aop's records of its runs; a list option replaces the recorded list |
 | `delegate suspend\|resume\|drop ACTOR KIND --reason ..` | the event | |
-| `delegate scorecard [KIND]` | nothing | prints each actor's cost per success or per unit, successes out of verdicts, score spread, integrity corrections, held minutes and open tasks |
+| `delegate scorecard [KIND]` | nothing | prints each actor's cost per success or per unit, successes out of verdicts, score spread, integrity corrections, held minutes, open tasks and rescored tasks |
 | `delegate candidates [--agent A..] [--all-agents] [--any-family] [--limit N]` | nothing | lists the models aop offers that the project has not configured as executors, for the agents it runs and the families its config names, priciest first, with each agent's pool room |
 | `delegate reap` | `close` with `aborted` | closes every open with no started event within the lease as aborted; every other command runs it first; a running task keeps its reservation until the lead closes it |
 

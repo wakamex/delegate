@@ -517,6 +517,7 @@ def scorecard(config: Config, state: State, env: Env, only: str | None = None) -
                     "successes": round(sum(success(t, kind) for t in final), 2),
                     "cost_per_success": stats.cost_per_success(actor, kind.classes[0]) if final else None,
                     "integrity": sum(t.defect == "integrity" for t in final),
+                    "rescored": sum("score.value" in t.amended for t in final),
                     "scores": {"min": min(scores), "median": median(scores), "max": max(scores)} if scores else None,
                     "yield": sum(t.yield_ or 0 for t in final) if kind.measure == "yield" else None,
                     "held_minutes": round(

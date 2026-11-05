@@ -451,8 +451,16 @@ def cmd_amend(config, session, args, moment):
         "aop_runs": args.aop_run,
         "commits": args.commit,
         "report": args.report,
+        "score.value": args.score,
+        "score.reason": args.score_reason,
     }
     new = {path: value for path, value in new.items() if value is not None}
+    if args.score is not None or args.score_reason is not None:
+        # A score is given before the lead reads the cost; a rescore corrects a slip and shows on the scorecard.
+        if not (task.close.get("score") or {}).get("reason"):
+            raise UsageError(f"{task.id} has no lead score to correct")
+        if args.score is not None and not 0 <= args.score <= 100:
+            raise UsageError("--score is from 0 to 100")
     if args.from_aop:
         runs = new.get("aop_runs", task.close.get("aop_runs") or [])
         results = [ENV["aop_result"](r) for r in runs]
@@ -629,7 +637,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", required=True)
     s.add_argument("--found-by", metavar="TASK")
 
-    s = sub.add_parser("amend", help="correct a closed task's costs, minutes, runs, commits or report")
+    s = sub.add_parser("amend", help="correct a closed task's costs, minutes, runs, commits, report or score")
     s.add_argument("task")
     s.add_argument("--reason", required=True)
     s.add_argument("--by", default="lead", help="who made the correction (default: lead)")
@@ -639,6 +647,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--aop-run", nargs="+", action="extend", help="the task's aop runs, replacing the recorded list")
     s.add_argument("--commit", nargs="+", action="extend", help="the task's commits, replacing the recorded list")
     s.add_argument("--report")
+    s.add_argument("--score", type=float, help="the lead score meant at close; the reason says what was mistyped")
+    s.add_argument("--score-reason")
     s.add_argument("--from-aop", action="store_true", help="actor cost and run minutes from aop's records of its runs")
 
     for name in ("suspend", "resume", "drop"):

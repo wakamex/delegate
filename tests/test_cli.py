@@ -159,6 +159,23 @@ class CliTests(unittest.TestCase):
             "not closed", self.run_cli("amend", other["task"], "--actor-cost", "1", "--reason", "x")[1]["error"]
         )
 
+    def test_amend_corrects_a_mistyped_score_and_the_scorecard_counts_the_rescore(self):
+        self.run_cli("drop", "dear", "port", "--reason", "only cheap in this test")
+        _, port = self.run_cli("select", "port", "bounded", "--assign", "cheap", "--why", "this test")
+        self.run_cli("close", port["task"], "--outcome", "held", "--score", "6", "--score-reason", "bounded port")
+        code, amend = self.run_cli("amend", port["task"], "--score", "60", "--reason", "typed 6 for 60")
+        self.assertEqual((code, amend["changes"]), (0, {"score.value": {"old": 6.0, "new": 60.0}}))
+        folded = cli.Ledger(self.directory / "ledger.jsonl").read().tasks[port["task"]]
+        self.assertEqual((folded.score, folded.close["score"]["reason"]), (60.0, "bounded port"))
+        row = next(r for r in self.run_cli("scorecard", "port")[1]["scorecard"] if r["actor"] == "cheap")
+        self.assertEqual(row["rescored"], 1)
+        self.assertEqual(self.run_cli("amend", port["task"], "--score", "101", "--reason", "x")[0], 2)
+        _, tool = self.run_cli("select", "tool", "bounded")
+        self.run_cli("close", tool["task"], "--outcome", "held", "--actor-cost", "1")
+        self.assertIn(
+            "no lead score", self.run_cli("amend", tool["task"], "--score", "50", "--reason", "x")[1]["error"]
+        )
+
     def test_repeated_list_options_append(self):
         _, chosen = self.run_cli("select", "tool", "bounded")
         code, closed = self.run_cli(
