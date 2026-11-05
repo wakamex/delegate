@@ -75,8 +75,8 @@ class FakePools:
     answer. A target nobody declared is a bug in the test and raises. BUDGET is the most dollars a target admits,
     and MAX_NEED the most points for a pool with no measured price."""
 
-    def __init__(self, rooms: dict[str, bool], marginal=None, budget=None, max_need=None):
-        self.rooms, self.marginal, self.calls = rooms, marginal or {}, []
+    def __init__(self, rooms: dict[str, bool], marginal=None, budget=None, max_need=None, accounts=None):
+        self.rooms, self.marginal, self.calls, self.accounts = rooms, marginal or {}, [], accounts or {}
         self.budget, self.max_need = budget or {}, max_need or {}
 
     def __call__(self, target, dollars, need):
@@ -97,12 +97,13 @@ class FakePools:
             "marginal": self.marginal.get(target, 1.0),
             "state": "admitted" if room else "refused",
             "reasons": [] if room else [f"{target} has no room"],
+            **({"account": self.accounts[target]} if target in self.accounts else {}),
         }
 
 
-def env(rooms=None, marginal=None, seed=1, budget=None, max_need=None) -> Env:
+def env(rooms=None, marginal=None, seed=1, budget=None, max_need=None, accounts=None) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, marginal, budget, max_need), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, marginal, budget, max_need, accounts), rng=random.Random(seed))
 
 
 class Book:

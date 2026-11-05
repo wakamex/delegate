@@ -78,6 +78,7 @@ def pool_check(target: str, dollars: float | None, need: float | dict[str, float
         "marginal": marginal(result.get("windows") or []),
         "state": result.get("state"),
         "reasons": result.get("reasons") or ([result["error"]] if result.get("error") else []),
+        **({"account": result["account_name"]} if result.get("account_name") else {}),
     }
 
 

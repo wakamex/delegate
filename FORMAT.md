@@ -76,6 +76,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `reason` | `warm-up`, `draw`, `cheapest`, `admit`, `assigned`, `lead`; older events may say `catch-up` |
 | `seed` | the draw's seed, for `draw` |
 | `marginal` | for `warm-up` and `draw`: the executors whose pool had quota due to expire, each with the share of its actor cost the choice priced its run at |
+| `account` | for an executor whose pool has several accounts, such as Claude's: the account the pool check chose for the run to land on, by the name usage-burn gives it (`account_name`), which the launcher applies; the answer carries it too |
 | `why` | for `assigned`: who chose the executor and why, in the lead's words |
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: SLOTS}` for a counted one, 1 unless more were asked for, such as all of a live client a relaunch would end every job on, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once |

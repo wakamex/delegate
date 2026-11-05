@@ -45,6 +45,11 @@ class PoolCheckTests(unittest.TestCase):
         self.assertEqual(result, {"room": True, "marginal": 0.0, "state": "admitted", "reasons": []})
         self.assertEqual(argv, ["--check", "cursor", "--need", "1.0000"])
 
+    def test_a_provider_with_several_accounts_names_the_one_the_run_lands_on(self):
+        result, argv = self.check("admitted-claude", "claude", 1.0, None)
+        self.assertEqual((result["room"], result["account"]), (True, "second"))
+        self.assertEqual(argv, ["--check", "claude", "--cost", "1.0000"])
+
     def test_the_window_leaving_a_run_the_least_expiring_quota_binds(self):
         windows = [
             {"run_points": 10, "pace": 0.5},  # 50 points expire: free

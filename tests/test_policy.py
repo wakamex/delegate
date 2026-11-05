@@ -275,12 +275,20 @@ class SelectionTests(unittest.TestCase):
         result, events = choose(self.config, Book(), kind="tool", e=full, assign="dear", why="user: dear confirms it")
         self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "dear", "assigned"))
         self.assertEqual(events[-1]["why"], "user: dear confirms it")
-        self.assertFalse(full.pool.calls)
+        # The pool is asked only which account the run lands on; its room does not hold an assignment back.
+        self.assertEqual(full.pool.calls, [("dear-pool", None, None)])
         with self.assertRaisesRegex(policy.SelectError, "needs --why"):
             choose(self.config, Book(), kind="tool", assign="dear")
         # A task for an executor not yet admitted is one of its admission trials, given with --admit.
         with self.assertRaisesRegex(policy.SelectError, "candidate in port.*--admit dear"):
             choose(self.config, Book(), kind="port", assign="dear", why="lead")
+
+    def test_the_open_names_the_account_the_pool_check_chose(self):
+        pools = env(accounts={"cheap-pool": "mcosma", "dear-pool": "mcosma"})
+        result, events = choose(self.config, Book(), e=pools)
+        self.assertEqual((result["account"], events[-1]["account"]), ("mcosma", "mcosma"))
+        result, events = choose(self.config, Book(), e=env())
+        self.assertNotIn("account", events[-1])
 
     def test_wait_while_pools_are_full_then_the_lead_after_the_deadline(self):
         full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})

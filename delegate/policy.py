@@ -346,6 +346,12 @@ def select(
         for key in ("seed", "retry_of", "why", "marginal"):
             if extra.get(key) is not None:
                 event[key] = extra[key]
+        # The account of a pool with several, such as Claude's, that the pool check chose for the run to land on.
+        executor = config.executors.get(actor)
+        if executor and executor.pool:
+            account = (checked.get(actor) or pool_room(executor)).get("account")
+            if account:
+                event["account"] = account
         events.append(event)
         return {
             **result,
@@ -353,6 +359,7 @@ def select(
             "actor": actor,
             "reason": reason,
             "resources": reservation or {},
+            **({"account": event["account"]} if "account" in event else {}),
             **({"executor": vars(config.executors[actor])} if actor in config.executors else {}),
         }, events
 
@@ -396,11 +403,14 @@ def select(
             "reasons": room.get("reasons") or [],
         }
 
+    checked: dict[str, dict] = {}  # each executor's pool check in this select
+
     def pool_room(executor) -> dict:
         if not executor.pool:
             return {"room": True, "marginal": 1.0}
         actor_part, lead_part, _ = stats.cost_parts(executor.name, cls)
-        return check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
+        checked[executor.name] = check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
+        return checked[executor.name]
 
     if admit:
         executor = config.executors.get(admit)

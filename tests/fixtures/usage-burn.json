@@ -24,5 +24,10 @@
     "command": "usage-burn --check opencode --need 5h=25,7d=25,30d=6",
     "exit": 1,
     "stdout": "{\"target\": \"opencode\", \"provider\": \"opencode\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"refused\", \"admitted\": false, \"permanent\": false, \"reasons\": [\"Week (7d): 0 points used and 25 more is over the 15.69 allowed by now at 1x pace\"], \"retry_after\": \"2026-11-02T18:01:38+00:00\", \"windows\": [{\"window\": \"Session (5h)\", \"paced\": false, \"used_pct\": 0.0, \"run_points\": 25.0, \"allowed_pct\": 100.0, \"accounts\": 1, \"resets_at\": null, \"pace\": null, \"burn\": null}, {\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 0.0, \"run_points\": 25.0, \"allowed_pct\": 15.6907, \"accounts\": 1, \"resets_at\": \"2026-11-09T00:00:00+00:00\", \"pace\": null, \"burn\": 0.760687624421963}, {\"window\": \"Month (30d)\", \"paced\": true, \"used_pct\": 47.44566201666667, \"run_points\": 6.0, \"allowed_pct\": 58.8875, \"accounts\": 1, \"resets_at\": \"2026-11-15T10:22:13+00:00\", \"pace\": 0.8540430237242354, \"burn\": 1.0474402456497904}]}"
+  },
+  "admitted-claude": {
+    "command": "usage-burn --check claude --cost 1",
+    "exit": 0,
+    "stdout": "{\"target\": \"claude\", \"provider\": \"claude\", \"account\": \"0000000000000000\", \"scope\": null, \"state\": \"admitted\", \"admitted\": true, \"permanent\": false, \"reasons\": [], \"retry_after\": null, \"windows\": [{\"window\": \"Week (7d)\", \"paced\": true, \"used_pct\": 0.0, \"run_points\": 0.029354945484823723, \"allowed_pct\": 38.9884, \"accounts\": 2, \"resets_at\": \"2026-11-10T13:00:00+00:00\", \"pace\": 0.0, \"burn\": 1.3276789985870217}], \"account_name\": \"second\"}"
   }
 }
