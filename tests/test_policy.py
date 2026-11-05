@@ -194,11 +194,10 @@ class SelectionTests(unittest.TestCase):
         _, events = choose(self.config, book)
         self.assertFalse([e for e in events if e["event"] == "drop"])
 
-    def test_reviewed_fallback_counts_only_tasks_after_admission(self):
+    def test_an_executor_that_mostly_fails_a_kind_is_dropped_from_it(self):
         book = Book()
-        for _ in range(2):
-            book.task("port", "cheap", "held", reason="admit", score=70)
-        for _ in range(3):
+        book.task("port", "cheap", "held", score=70)
+        for _ in range(4):
             book.task("port", "cheap", "corrected")
         _, events = choose(self.config, book, kind="port")
         self.assertIn("cheap", [e["actor"] for e in events if e["event"] == "drop"])
@@ -224,50 +223,45 @@ class SelectionTests(unittest.TestCase):
     def test_one_integrity_correction_suspends_in_reviewed_kinds_only(self):
         book = Book()
         for _ in range(2):
-            book.task("port", "cheap", "held", reason="admit", score=70)
+            book.task("port", "cheap", "held", score=70)
         book.task("port", "cheap", "corrected", defect="integrity")
         book.task("tool", "cheap", "corrected", defect="integrity")
         state = book.state()
         self.assertEqual(standing(Stats(self.config, state, self.config.kinds["port"], env()), "cheap"), "suspended")
-        self.assertEqual(standing(Stats(self.config, state, self.config.kinds["tool"], env()), "cheap"), "admitted")
+        self.assertEqual(standing(Stats(self.config, state, self.config.kinds["tool"], env()), "cheap"), "active")
         book.add(event="resume", actor="cheap", kind="port", reason="reviewed")
         self.assertEqual(
-            standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "admitted"
+            standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
         )
 
-    def test_reviewed_admission_passes_at_two_of_three_and_fails_at_two_failures(self):
-        port = self.config.kinds["port"]
+    def test_a_new_executor_takes_one_task_of_any_class_then_waits_for_its_verdict(self):
+        # No trial and no class ladder: a configured executor warms up on whatever class comes, first-reading here,
+        # and takes no second task in the kind until the first is judged.
         book = Book()
-        book.task("port", "cheap", "held", reason="admit", score=60)
-        self.assertEqual(standing(Stats(self.config, book.state(), port, env()), "cheap"), "trial")
-        book.task("port", "cheap", "steered", reason="admit", score=60)
-        self.assertEqual(standing(Stats(self.config, book.state(), port, env()), "cheap"), "admitted")
-        book.task("port", "dear", "corrected", reason="admit")
-        book.task("port", "dear", "corrected", reason="admit")
-        self.assertEqual(standing(Stats(self.config, book.state(), port, env()), "dear"), "failed")
-        book.add(event="resume", actor="dear", kind="port", reason="lead decision")
-        self.assertEqual(standing(Stats(self.config, book.state(), port, env()), "dear"), "admitted")
-
-    def test_class_rule_and_lead_only_class(self):
-        book = Book()
-        for _ in range(2):
-            book.task("port", "cheap", "held", reason="admit", score=60)
-        self.assertEqual(choose(self.config, book, kind="port", cls="first-reading")[0]["actor"], "cheap")
-        book2 = Book()
-        for _ in range(2):
-            book2.task("port", "cheap", "held", reason="admit", score=60, cls="bounded")
-        result, _ = choose(self.config, book2, kind="port", cls="redesign")
+        first, events = choose(self.config, book, kind="port", cls="first-reading")
+        self.assertEqual((first["answer"], first["reason"]), ("delegate", "warm-up"))
+        book.add(**{k: v for k, v in events[-1].items()})
+        second, _ = choose(self.config, book, kind="port", cls="first-reading")
+        self.assertEqual(second["reason"], "warm-up")
+        self.assertNotEqual(second["actor"], first["actor"])
+        # A lead-only class stays with the lead.
+        result, _ = choose(self.config, Book(), kind="port", cls="redesign")
         self.assertEqual((result["answer"], result["actor"]), ("lead", LEAD))
 
-    def test_a_reviewed_kind_with_nobody_admitted_goes_to_the_lead(self):
-        result, _ = choose(self.config, Book(), kind="port")
-        self.assertEqual(result["answer"], "lead")
-
-    def test_admit_runs_a_trial_on_the_lowest_class(self):
-        result, _ = choose(self.config, Book(), kind="port", admit="cheap")
-        self.assertEqual((result["answer"], result["reason"]), ("admit", "admit"))
-        with self.assertRaises(policy.SelectError):
-            choose(self.config, Book(), kind="port", cls="first-reading", admit="cheap")
+    def test_a_class_s_success_starts_from_the_kind_and_follows_its_own_verdicts(self):
+        book = Book()
+        for _ in range(6):
+            book.task("port", "cheap", "held", score=100, cls="bounded")
+        stats = Stats(self.config, book.state(), self.config.kinds["port"], env())
+        a, b = stats.success_counts("cheap", "first-reading")
+        self.assertAlmostEqual(a / (a + b), 7 / 8)  # its rate in the other classes, as a prior worth two tasks
+        for _ in range(4):
+            book.task("port", "cheap", "corrected", cls="first-reading")
+        stats = Stats(self.config, book.state(), self.config.kinds["port"], env())
+        a, b = stats.success_counts("cheap", "first-reading")
+        self.assertLess(a / (a + b), 0.4)
+        a, b = stats.success_counts("cheap", "bounded")
+        self.assertGreater(a / (a + b), 0.75)  # its own six held, pulled a little by the failures elsewhere
 
     def test_assign_opens_for_a_named_admitted_executor_with_the_reason_recorded(self):
         # The pool is full and the draw would warm up another executor; the assignment holds and says why.
@@ -279,9 +273,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(full.pool.calls, [("dear-pool", None, None)])
         with self.assertRaisesRegex(policy.SelectError, "needs --why"):
             choose(self.config, Book(), kind="tool", assign="dear")
-        # A task for an executor not yet admitted is one of its admission trials, given with --admit.
-        with self.assertRaisesRegex(policy.SelectError, "candidate in port.*--admit dear"):
-            choose(self.config, Book(), kind="port", assign="dear", why="lead")
+        # A new executor can be assigned too; a suspended one cannot until it is resumed.
+        self.assertEqual(choose(self.config, Book(), kind="port", assign="dear", why="user")[0]["actor"], "dear")
+        book = Book()
+        book.task("port", "dear", "corrected", defect="integrity")
+        with self.assertRaisesRegex(policy.SelectError, "dear is suspended in port; resume it"):
+            choose(self.config, book, kind="port", assign="dear", why="lead")
 
     def test_the_open_names_the_account_the_pool_check_chose(self):
         pools = env(accounts={"cheap-pool": "mcosma", "dear-pool": "mcosma"})

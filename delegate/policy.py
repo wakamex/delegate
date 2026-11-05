@@ -12,7 +12,6 @@ LEAD = "lead"
 DROP_CONFIDENCE = 0.95  # drop when cost per success is this likely to exceed the lead's
 FALLBACK_CONFIDENCE = 0.90  # drop when the success rate is this likely below one half
 MIN_VERDICTS = 5  # verdicts an actor needs before it is compared
-CLASS_VERDICTS = 3  # verdicts in a class before cost is taken per class
 DRAWS = 4000
 
 
@@ -46,10 +45,11 @@ def success(task: Task, kind: Kind) -> float | None:
     return 1.0
 
 
-def counts(tasks: list[Task], kind: Kind) -> tuple[float, float]:
-    """Beta(a, b) over final tasks: one plus successes, one plus failures."""
+def counts(tasks: list[Task], kind: Kind, prior: float = 0.5) -> tuple[float, float]:
+    """Beta(a, b) over final tasks: successes and failures plus two prior tasks split at the PRIOR success rate,
+    Beta(1, 1) at the default one half."""
     values = [v for t in tasks if (v := success(t, kind)) is not None]
-    return 1 + sum(values), 1 + sum(1 - v for v in values)
+    return 2 * prior + sum(values), 2 * (1 - prior) + sum(1 - v for v in values)
 
 
 def shrunk(values: list[float], prior: float | None) -> float | None:
@@ -76,10 +76,15 @@ class Stats:
     def final(self, actor: str) -> list[Task]:
         return [t for t in self.of(actor) if t.final]
 
-    def scope(self, actor: str, cls: str) -> list[Task]:
-        """The actor's tasks in the class once it has CLASS_VERDICTS there, else in the kind."""
-        in_class = [t for t in self.of(actor) if t.cls == cls]
-        return in_class if sum(t.final for t in in_class) >= CLASS_VERDICTS else self.of(actor)
+    def in_class(self, actor: str, cls: str) -> list[Task]:
+        return [t for t in self.of(actor) if t.cls == cls]
+
+    def success_counts(self, actor: str, cls: str) -> tuple[float, float]:
+        """Beta(a, b) of the actor's success in the class, its prior the actor's success rate in the kind's other
+        classes, so a class it has not done starts from how it does in the others, and its own verdicts there soon
+        decide."""
+        a, b = counts([t for t in self.final(actor) if t.cls != cls], self.kind)
+        return counts([t for t in self.final(actor) if t.cls == cls], self.kind, a / (a + b))
 
     def _costs(self, tasks: list[Task], part: str) -> list[float]:
         return [c for t in tasks if (c := t.cost(part)) is not None]
@@ -93,15 +98,21 @@ class Stats:
         return mean(self._costs(others, "actor"))
 
     def cost_parts(self, actor: str, cls: str) -> tuple[float | None, float, float]:
-        """Expected actor, lead and redo cost of one task, each a shrunk mean; the actor part None when unknown."""
-        scope = self.scope(actor, cls)
-        actor_part = shrunk(self._costs(scope, "actor"), self.actor_prior(actor))
+        """Expected actor, lead and redo cost of one task, each a mean over the actor's tasks in the class shrunk
+        toward its mean in the kind's other classes, itself shrunk toward a prior; the actor part None when unknown."""
+        here = self.in_class(actor, cls)
+        others = [t for t in self.of(actor) if t.cls != cls]
+
+        def part(costs, prior):
+            return shrunk(costs(here), shrunk(costs(others), prior))
+
+        actor_part = part(lambda ts: self._costs(ts, "actor"), self.actor_prior(actor))
         delegated = [t for t in self.tasks if t.actor != LEAD]
         lead_part = 0.0
         if actor != LEAD:
-            lead_part = shrunk(self._costs(scope, "lead"), mean(self._costs(delegated, "lead"))) or 0.0
+            lead_part = part(lambda ts: self._costs(ts, "lead"), mean(self._costs(delegated, "lead"))) or 0.0
         redo_prior = mean([t.redo_cost for t in self.tasks if t.final]) or 0.0
-        redo_part = shrunk([t.redo_cost for t in scope if t.final], redo_prior) or 0.0
+        redo_part = part(lambda ts: [t.redo_cost for t in ts if t.final], redo_prior) or 0.0
         return actor_part, lead_part, redo_part
 
     def marginal_cost(self, actor: str, cls: str, marginal: float = 1.0) -> float | None:
@@ -132,7 +143,7 @@ class Stats:
         """Draws of cost per success, the actor's part priced at MARGINAL, the share of it the run really spends."""
         cost = self.marginal_cost(actor, cls, marginal)
         cost = 1.0 if cost is None else cost
-        a, b = counts(self.final(actor), self.kind)
+        a, b = self.success_counts(actor, cls)
         factor = self.yield_factor(actor)
         return [cost / (max(rng.betavariate(a, b), 1e-12) * factor) for _ in range(n)]
 
@@ -140,7 +151,7 @@ class Stats:
         cost = self.expected_cost(actor, cls)
         if cost is None:
             return None
-        a, b = counts(self.final(actor), self.kind)
+        a, b = self.success_counts(actor, cls)
         return cost / (a / (a + b) * self.yield_factor(actor))
 
 
@@ -166,7 +177,8 @@ def judged_at(task: Task) -> datetime:
 
 
 def standing(stats: Stats, actor: str) -> str:
-    """admitted, trial, failed, candidate, dropped or suspended."""
+    """active, dropped or suspended. Every configured executor is active in every kind until a rule takes it out:
+    its record in each class, not a trial, decides how much work it gets."""
     kind, state = stats.kind, stats.state
     resumed = last_time(_events(state, "resume", kind.name, actor))
     dropped = last_time(_events(state, "drop", kind.name, actor))
@@ -176,27 +188,7 @@ def standing(stats: Stats, actor: str) -> str:
         for task in stats.final(actor):
             if task.defect == "integrity" and (resumed is None or judged_at(task) > resumed):
                 return "suspended"
-    if kind.check == "gated" or resumed is not None:
-        return "admitted"
-    trials = [t for t in stats.of(actor) if t.reason == "admit"]
-    judged = [t for t in trials if t.final]
-    if _trial_passed(judged, kind):
-        return "admitted"
-    if _trial_failed(judged, kind):
-        return "failed"
-    return "trial" if trials else "candidate"
-
-
-def _trial_passed(tasks: list[Task], kind: Kind) -> bool:
-    successes = [t.outcome in ("held", "steered") for t in tasks]
-    if kind.check == "reviewed":
-        return sum(successes[:3]) >= 2
-    return sum(successes) >= 2 and all(successes)
-
-
-def _trial_failed(tasks: list[Task], kind: Kind) -> bool:
-    failures = sum(t.outcome == "corrected" for t in tasks)
-    return failures >= 2 if kind.check == "reviewed" else failures >= 1
+    return "active"
 
 
 def prob_exceeds(draws_a: list[float], draws_b: list[float]) -> float:
@@ -210,16 +202,15 @@ def beta_below(a: float, b: float, threshold: float, rng: random.Random, n: int 
 def should_drop(stats: Stats, actor: str, cls: str) -> str | None:
     """The drop rule's reason, or None.
 
-    An executor is dropped when its success rate is probably below one half over its tasks after admission, or,
+    An executor is dropped when its success rate over the kind is probably below one half, or,
     once it and the lead each have MIN_VERDICTS verdicts, when doing the task as the lead is probably cheaper per
     success. It is not dropped for costing more than another executor: the draw already prefers the cheaper one,
     and a pool the cheapest executor runs on can be exhausted.
     """
     rng = random.Random(f"{stats.kind.name}:{actor}:{len(stats.state.events)}")
     mine = stats.final(actor)
-    after = [t for t in mine if t.reason != "admit"]
-    if after:
-        a, b = counts(after, stats.kind)
+    if mine:
+        a, b = counts(mine, stats.kind)
         p = beta_below(a, b, 0.5, rng)
         if p > FALLBACK_CONFIDENCE:
             return f"success rate {p:.0%} likely below one half"
@@ -272,17 +263,6 @@ def reserve(config: Config, state: State, specs: list[str]) -> tuple[dict | None
 # ---- the choice ----------------------------------------------------------------------------------
 
 
-def class_allows(stats: Stats, actor: str, cls: str) -> bool:
-    """Reviewed and deferred kinds: a held or steered task of the class or the one below."""
-    if stats.kind.check == "gated":
-        return True
-    index = stats.kind.classes.index(cls)
-    if index == 0:
-        return True
-    allowed = set(stats.kind.classes[index - 1 : index + 1])
-    return any(t.cls in allowed and t.outcome in ("held", "steered") for t in stats.final(actor))
-
-
 def busy_until_verdict(stats: Stats, actor: str) -> bool:
     """No further task in the kind before a first verdict there."""
     mine = stats.of(actor)
@@ -301,7 +281,6 @@ def select(
     resources: list[str] | None = None,
     token_cap: float | None = None,
     retry: str | None = None,
-    admit: str | None = None,
     since: datetime | None = None,
     assign: str | None = None,
     why: str | None = None,
@@ -412,41 +391,14 @@ def select(
         checked[executor.name] = check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
         return checked[executor.name]
 
-    if admit:
-        executor = config.executors.get(admit)
-        if executor is None:
-            raise SelectError(f"unknown executor {admit!r}")
-        if standing(stats, admit) in ("admitted", "suspended", "dropped"):
-            raise SelectError(f"{admit} is {standing(stats, admit)} in {kind_name}; admission is for new candidates")
-        if kind.check == "reviewed" and cls != kind.classes[0]:
-            raise SelectError(f"a reviewed admission trial takes the lowest class, {kind.classes[0]}")
-        if not set(kind.capabilities) <= set(executor.capabilities):
-            raise SelectError(
-                f"{admit} lacks capabilities {sorted(set(kind.capabilities) - set(executor.capabilities))}"
-            )
-        if busy:
-            return answer("wait", waiting_for=busy)
-        room = pool_room(executor)
-        if not room["room"]:
-            refuse(admit, room)
-            return answer("wait", waiting_for=executor.pool)
-        return answer("admit", admit, "admit")
-
     if assign:
         executor = config.executors.get(assign)
         if executor is None:
             raise SelectError(f"unknown executor {assign!r}")
-        if admit:
-            raise SelectError("--assign and --admit cannot be combined")
         if not why:
             raise SelectError("an assignment needs --why, the user's or lead's reason")
-        if (position := standing(stats, assign)) in ("candidate", "trial"):
-            raise SelectError(
-                f"{assign} is {position} in {kind_name}: its tasks are admission trials, so give it this one "
-                f"with --admit {assign}"
-            )
-        if position != "admitted":
-            raise SelectError(f"{assign} is {position} in {kind_name}; assign an admitted executor")
+        if (position := standing(stats, assign)) != "active":
+            raise SelectError(f"{assign} is {position} in {kind_name}; resume it before assigning it work")
         if not set(kind.capabilities) <= set(executor.capabilities):
             raise SelectError(
                 f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(executor.capabilities))}"
@@ -464,12 +416,9 @@ def select(
         return lead()
     eligible, pool_blocked = [], []
     for name, executor in config.executors.items():
-        position = standing(stats, name)
-        if position != "admitted":
+        if standing(stats, name) != "active" or busy_until_verdict(stats, name):
             continue
         if name == excluded or not set(kind.capabilities) <= set(executor.capabilities):
-            continue
-        if not class_allows(stats, name, cls) or busy_until_verdict(stats, name):
             continue
         if reason := should_drop(stats, name, cls):
             events.append(
@@ -505,20 +454,17 @@ def select(
     if busy:
         return answer("wait", waiting_for=busy)
 
-    def pick(names: list[str], reason: str):
-        return answer("delegate", names[0], reason)
-
-    if kind.check == "deferred":
-        ranked = sorted(
-            eligible, key=lambda n: (stats.cost_per_success(n, cls) is None, stats.cost_per_success(n, cls) or 0, n)
-        )
-        return pick(ranked, "cheapest")
     # Quota due to expire unused costs nothing, so a run on a pool behind its pace is priced at its marginal share
-    # of the actor's cost, the success rate still counting; not on the lead's pool, whose quota the lead needs.
+    # of the actor's cost, the success rate still counting; not on the lead's pool, whose quota the lead needs, and
+    # not in a deferred kind, whose choice is the cheapest by its real cost.
     marginal = {
-        n: 1.0 if config.executors[n].pool == config.lead_pool else rooms[n].get("marginal", 1.0) for n in eligible
+        n: 1.0
+        if kind.check == "deferred" or config.executors[n].pool == config.lead_pool
+        else rooms[n].get("marginal", 1.0)
+        for n in eligible
     }
     discounts = {n: round(m, 3) for n, m in marginal.items() if m < 1}
+    # Every executor gets one task in a kind before the record decides, and no second until that one is judged.
     untried = [n for n in eligible if not stats.of(n)]
     if untried:
         ranked = sorted(
@@ -526,6 +472,11 @@ def select(
             key=lambda n: (stats.expected_cost(n, cls) is None, stats.marginal_cost(n, cls, marginal[n]) or 0, n),
         )
         return answer("delegate", ranked[0], "warm-up", marginal=discounts or None)
+    if kind.check == "deferred":
+        ranked = sorted(
+            eligible, key=lambda n: (stats.cost_per_success(n, cls) is None, stats.cost_per_success(n, cls) or 0, n)
+        )
+        return answer("delegate", ranked[0], "cheapest")
     seed = env.rng.randrange(2**32)
     rng = random.Random(seed)
     draws = {n: stats.cost_per_success_draws(n, cls, rng, 1, marginal[n])[0] for n in sorted(eligible)}

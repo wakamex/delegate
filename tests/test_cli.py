@@ -144,12 +144,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, closed["commits"]), (0, ["d14bf870", "74ffd39f"]))
 
     def test_close_checks_the_kind_s_rules(self):
-        _, chosen = self.run_cli("select", "recon", "bounded", "--admit", "cheap")
+        _, chosen = self.run_cli("select", "recon", "bounded", "--assign", "cheap", "--why", "this test")
         code, error = self.run_cli("close", chosen["task"], "--outcome", "held")
         self.assertEqual(code, 2)
         self.assertIn("awaiting", error["error"])
         self.run_cli("drop", "dear", "port", "--reason", "only cheap in this test")
-        _, port = self.run_cli("select", "port", "bounded", "--admit", "cheap")
+        _, port = self.run_cli("select", "port", "bounded", "--assign", "cheap", "--why", "this test")
         self.assertIn("needs --score", self.run_cli("close", port["task"], "--outcome", "held")[1]["error"])
         self.assertEqual(
             self.run_cli("close", port["task"], "--outcome", "held", "--score", "60", "--score-reason", "bounded port")[
@@ -157,7 +157,7 @@ class CliTests(unittest.TestCase):
             ],
             0,
         )
-        _, probe = self.run_cli("select", "probe", "bounded", "--admit", "cheap")
+        _, probe = self.run_cli("select", "probe", "bounded", "--assign", "cheap", "--why", "this test")
         self.assertIn("evidence", self.run_cli("close", probe["task"], "--outcome", "held")[1]["error"])
         close = ("close", probe["task"], "--outcome", "held", "--evidence", "a.txt", "--falsifier-checked")
         code, answer = self.run_cli(*close, "some text")
@@ -167,7 +167,7 @@ class CliTests(unittest.TestCase):
         self.assertIs(self.events()[-1]["falsifier_checked"], True)
 
     def test_a_deferred_task_closes_awaiting_and_takes_its_verdict(self):
-        _, chosen = self.run_cli("select", "recon", "bounded", "--admit", "cheap")
+        _, chosen = self.run_cli("select", "recon", "bounded", "--assign", "cheap", "--why", "this test")
         task = chosen["task"]
         self.run_cli("started", task, "--unit", "m4-recon")
         self.assertEqual(self.run_cli("close", task, "--outcome", "awaiting", "--actor-cost", "1")[0], 0)

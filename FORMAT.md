@@ -73,7 +73,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 |---|---|
 | `kind`, `class` | from the config |
 | `actor` | an executor name from the config, or `"lead"` |
-| `reason` | `warm-up`, `draw`, `cheapest`, `admit`, `assigned`, `lead`; older events may say `catch-up` |
+| `reason` | `warm-up`, `draw`, `cheapest`, `assigned`, `lead`; older events may say `admit` or `catch-up` |
 | `seed` | the draw's seed, for `draw` |
 | `marginal` | for `warm-up` and `draw`: the executors whose pool had quota due to expire, each with the share of its actor cost the choice priced its run at |
 | `account` | for an executor whose pool has several accounts, such as Claude's: the account the pool check chose for the run to land on, by the name usage-burn gives it (`account_name`), which the launcher applies; the answer carries it too |
@@ -123,7 +123,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 | Command | Writes | Does |
 |---|---|---|
-| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--admit EXECUTOR] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `admit`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured. An `error` answer is a wait in which a pool check could not answer, with the failure in `error`, and exits 2 |
+| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured. An `error` answer is a wait in which a pool check could not answer, with the failure in `error`, and exits 2 |
 | `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | |
 | `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript |
 | `delegate verdict TASK --outcome ..` | `verdict` | |

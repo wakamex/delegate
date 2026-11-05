@@ -259,7 +259,6 @@ def cmd_select(config, session, args, moment):
         resources,
         args.token_cap,
         args.retry,
-        args.admit,
         since,
         args.assign,
         args.why,
@@ -529,17 +528,14 @@ def parser() -> argparse.ArgumentParser:
     )
     sub = top.add_subparsers(dest="command", required=True, parser_class=Parser)
 
-    s = sub.add_parser("select", help="choose delegate, admit, wait or lead, and open the task")
+    s = sub.add_parser("select", help="choose delegate, wait or lead, and open the task")
     s.add_argument("kind")
     s.add_argument("cls", metavar="class")
     s.add_argument("--resources", help="R[=AMOUNT],... (default: the kind's)")
     s.add_argument("--token-cap", type=float)
     s.add_argument("--retry", metavar="TASK")
-    s.add_argument("--admit", metavar="EXECUTOR")
     s.add_argument("--since", help="when this task started waiting, from a previous wait answer")
-    s.add_argument(
-        "--assign", metavar="EXECUTOR", help="open for this admitted executor, skipping the draw and pool check"
-    )
+    s.add_argument("--assign", metavar="EXECUTOR", help="open for this executor, skipping the draw and pool room")
     s.add_argument("--why", help="with --assign: who chose it and why, such as 'user: cursor confirms this fixture'")
 
     s = sub.add_parser("started", help="record what holds the task's reservation")
