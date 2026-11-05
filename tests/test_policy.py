@@ -106,6 +106,27 @@ class SelectionTests(unittest.TestCase):
             expected={"actor_cost": cost, "lead_cost": lead_cost},
         )
 
+    def test_a_pool_takes_at_most_its_runs_of_open_tasks(self):
+        # Devin's free-model limit is invisible to its reading; two lockouts came with four runs overlapping.
+        config = make_config(BASE + "\n[pools.cheap-pool]\nruns = 1\n")
+        book = Book()
+        book.task("tool", "cheap", "held", cost=1)
+        book.task("tool", "dear", "held", cost=5)
+        self.going(book)  # open and unclosed, as a task waiting to resume is
+        pools = env()
+        result, _ = choose(config, book, e=pools)
+        self.assertEqual(result["actor"], "dear")
+        self.assertNotIn("cheap-pool", [call[0] for call in pools.pool.calls])
+        result, _ = choose(config, book, e=env(rooms={"cheap-pool": True, "dear-pool": False, "lead-pool": True}))
+        self.assertEqual(result["refused"]["cheap"]["reasons"], ["cheap-pool takes 1 open tasks at once and has 1"])
+        book.add(event="close", task="port-0101", outcome="aborted")
+        pools = env()
+        choose(config, book, e=pools)
+        self.assertIn("cheap-pool", [call[0] for call in pools.pool.calls])  # a closed task frees its place
+        for bad in ("runs = 0", "runs = 1.5", "runs = true"):
+            with self.assertRaises(ConfigError):
+                make_config(BASE + f"\n[pools.cheap-pool]\n{bad}\n")
+
     def test_runs_already_going_on_a_pool_count_toward_its_check(self):
         # A $4 port is going on cheap-pool, which admits $8: a $5 run makes $9, so dear is drawn.
         book = Book()

@@ -361,6 +361,15 @@ def select(
         which the pool's reading cannot show yet, and for a pool with no measured price its need in points for each
         of those runs."""
         going = running.get(pool, [])
+        if (most := config.pool_runs.get(pool)) is not None and len(going) >= most:
+            return {
+                "room": False,
+                "marginal": 1.0,
+                "state": "refused",
+                "reasons": [f"{pool} takes {most} open tasks at once and has {len(going)}"],
+                "dollars": dollars,
+                "need": None,
+            }
         for task in going:
             expected = task.open.get("expected") or {}
             spent = pool_dollars(task.actor, expected.get("actor_cost"), expected.get("lead_cost"))

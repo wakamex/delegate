@@ -65,6 +65,8 @@ class Config:
     kinds: dict[str, Kind]
     # Points a run takes of a pool with no measured price: one number for every window, or one per window length.
     pool_need: dict[str, float | dict[str, float]] = field(default_factory=dict)
+    # The most of the project's tasks open on a pool at once, for a limit its reading cannot show.
+    pool_runs: dict[str, int] = field(default_factory=dict)
     candidate_families: list[str] = field(default_factory=list)
 
     @property
@@ -239,12 +241,18 @@ def load(path: Path) -> Config:
             re.compile(pattern)
         except re.error as exc:
             raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
-    pool_need = {}
+    pool_need, pool_runs = {}, {}
     for name, value in data.get("pools", {}).items():
-        _known(value, {"need"}, f"pools.{name}")
-        if "need" not in value:
+        _known(value, {"need", "runs"}, f"pools.{name}")
+        if not value:
             raise ConfigError(f"pools.{name} sets nothing")
-        pool_need[name] = _need(value["need"], f"pools.{name}.need")
+        if "need" in value:
+            pool_need[name] = _need(value["need"], f"pools.{name}.need")
+        if "runs" in value:
+            runs = value["runs"]
+            if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
+                raise ConfigError(f"pools.{name}.runs must be a whole number of at least 1")
+            pool_runs[name] = runs
     return Config(
         path=path,
         project=data["project"],
@@ -257,6 +265,7 @@ def load(path: Path) -> Config:
         executors=executors,
         kinds=kinds,
         pool_need=pool_need,
+        pool_runs=pool_runs,
         candidate_families=families,
     )
 
