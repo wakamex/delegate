@@ -480,8 +480,15 @@ def cmd_amend(config, session, args, moment):
             "cost.actor", sum(float((r.get("calculated_cost") or {}).get("amount_usd") or 0) for r in results)
         )
         new.setdefault("minutes.run", sum(float(r.get("duration_seconds") or 0) for r in results) / 60)
+    if args.from_lead_session:
+        others = [t.opened for t in session.state.tasks.values() if t.id != task.id]
+        runs = new.get("aop_runs", task.close.get("aop_runs") or [])
+        cost = ENV["lead_cost"](config, task, runs, args.lead_session, others)
+        if cost is None:
+            raise UsageError(f"no lead session to recompute {task.id}'s lead cost from; give --lead-session")
+        new.setdefault("cost.lead", cost)
     if not new:
-        raise UsageError("amend needs a field to correct, or --from-aop")
+        raise UsageError("amend needs a field to correct, --from-aop or --from-lead-session")
 
     def old(path):
         head, _, leaf = path.partition(".")
@@ -660,6 +667,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--score", type=float, help="the lead score meant at close; the reason says what was mistyped")
     s.add_argument("--score-reason")
     s.add_argument("--from-aop", action="store_true", help="actor cost and run minutes from aop's records of its runs")
+    s.add_argument("--from-lead-session", action="store_true", help="lead cost recomputed from the lead's session")
+    s.add_argument("--lead-session", help="the lead's session id (default: DELEGATE_LEAD_SESSION, then the config)")
 
     for name in ("suspend", "resume", "drop"):
         s = sub.add_parser(name, help=f"{name} an executor in a kind")
