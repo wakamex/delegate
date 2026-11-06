@@ -154,6 +154,9 @@ class CliTests(unittest.TestCase):
         code, commits = self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "missed commits")
         self.assertEqual(commits["changes"], {"commits": {"old": [], "new": ["abc123", "def456"]}})
         self.assertEqual(self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "again")[0], 2)
+        with mock.patch.dict(cli.ENV, {"lead_cost": lambda *args: 0.25}):
+            code, lead = self.run_cli("amend", task, "--from-lead-session", "--reason", "charged another task's turns")
+        self.assertEqual((code, lead["changes"]), (0, {"cost.lead": {"old": 0.5, "new": 0.25}}))
         _, other = self.run_cli("select", "tool", "bounded")
         self.assertIn(
             "not closed", self.run_cli("amend", other["task"], "--actor-cost", "1", "--reason", "x")[1]["error"]
