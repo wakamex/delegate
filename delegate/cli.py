@@ -116,7 +116,8 @@ def aop_result(run_id: str) -> dict | None:
 def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
     """Sum the lead cost charged to a task: each turn whose triggering message names one of NAMES (its agent-job
     units or aop runs), and its part of the turn in which it was opened, which holds its brief. Every cost row
-    belongs to the latest turn started at or before it; other turns, including the user's own, charge no task.
+    belongs to the latest turn started at or before it; other turns, including the user's own and those before the
+    task was opened, charge no task.
 
     A turn can open several tasks, so the opening turn is split among them at the times they were opened (this
     task's OPENED and OTHER_OPENS): each takes the responses from the previous opening, or the turn's start, up to
@@ -129,8 +130,13 @@ def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
 
     # A name matches only as a whole token, so a unit job-ab does not match a message about job-ab2.
     patterns = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in names if name]
-    charged = {i for i, (_, text) in enumerate(turns) if any(p.search(text) for p in patterns)}
     opening = turn_of(opened)
+    # A turn before the one that opened the task belongs to an earlier task, even one that reused its unit's name.
+    charged = {
+        i
+        for i, (_, text) in enumerate(turns)
+        if (opening is None or i >= opening) and any(p.search(text) for p in patterns)
+    }
     segment_start, segment_end = None, None
     if opening is not None:
         same_turn = [t for t in other_opens if turn_of(t) == opening]
@@ -197,7 +203,11 @@ def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) 
     if activity is None:
         return None
     since = task.opened - timedelta(days=1)  # leaves out responses a fork copied in with earlier times
-    costs = [(moment, cost) for moment, cost in activity["costs"] if moment >= since]
+    # A closed task's lead cost ends at its close, so a later task reusing its unit's name is not charged to it.
+    until = parse_time(task.close["at"]) if task.close else None
+    costs = [
+        (moment, cost) for moment, cost in activity["costs"] if moment >= since and (until is None or moment <= until)
+    ]
     started = task.started or {}
     names = [name for name in [*(started.get("units") or []), started.get("aop_run"), *runs] if name]
     return charged_lead_cost(activity["turns"], costs, names, task.opened, other_opens)
@@ -602,7 +612,7 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("task")
         s.add_argument("--outcome", required=True, choices=outcomes)
         s.add_argument("--caught-by", choices=("gate", "review", "deferred-check"))
-        s.add_argument("--defect", choices=("integrity", "scope", "failed-gate"))
+        s.add_argument("--defect", choices=("integrity", "scope", "failed-gate", "unfinished"))
         s.add_argument("--score", type=float)
         s.add_argument("--score-reason")
         s.add_argument("--yield", dest="yield_", type=float)

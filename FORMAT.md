@@ -93,7 +93,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 |---|---|
 | `outcome` | `held`, `steered`, `corrected`, `aborted`, or `awaiting` in a deferred kind |
 | `caught_by` | for corrected: `gate`, `review` or `deferred-check` |
-| `defect` | for corrected: `integrity`, `scope` or `failed-gate` |
+| `defect` | for corrected: `integrity`, `scope`, `failed-gate` or `unfinished` |
 | `brief_error` | the decision the brief left out, if the lead's |
 | `resumes` | resumes in the session |
 | `cost` | `{"actor": .., "lead": ..}` in API-equivalent dollars; `null` where unknown |
@@ -115,7 +115,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 ### Lead cost
 
-`close` fills `cost.lead` for the lead session given by `--lead-session`, else the `DELEGATE_LEAD_SESSION` environment variable, else `[lead] session`; a lead's session id changes whenever it starts afresh, so the config value is only a default. delegate decides which turns are the task's: every lead turn whose triggering message names one of the task's agent-job units or aop runs as a whole token, and its part of the turn in which `select` opened it: a turn that opens several tasks is split at their openings, each taking the responses from the previous opening, or the turn's start, up to its own, which hold its brief, and the last one also the rest of the turn, which holds its launch, so no response is charged to two tasks. A turn whose trigger names no task, such as a user's message, is charged to no task. The turns come from `sch -s SESSION -t user --json`, which reads the user messages of every harness it supports, and each response's cost from `clanker-analytics session-costs`, which deduplicates and prices them, so delegate reads no transcript and does no pricing of its own. When either cannot be had, the lead cost is `null`.
+`close` fills `cost.lead` for the lead session given by `--lead-session`, else the `DELEGATE_LEAD_SESSION` environment variable, else `[lead] session`; a lead's session id changes whenever it starts afresh, so the config value is only a default. delegate decides which turns are the task's: every lead turn whose triggering message names one of the task's agent-job units or aop runs as a whole token, and its part of the turn in which `select` opened it: a turn that opens several tasks is split at their openings, each taking the responses from the previous opening, or the turn's start, up to its own, which hold its brief, and the last one also the rest of the turn, which holds its launch, so no response is charged to two tasks. A turn whose trigger names no task, such as a user's message, is charged to no task. Only turns from the one that opened the task to its close count, so tasks that reuse an agent-job unit's name, as a retry of the same work often does, are not charged each other's turns. The turns come from `sch -s SESSION -t user --json`, which reads the user messages of every harness it supports, and each response's cost from `clanker-analytics session-costs`, which deduplicates and prices them, so delegate reads no transcript and does no pricing of its own. When either cannot be had, the lead cost is `null`.
 
 ### Actor and kind events
 

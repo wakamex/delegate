@@ -31,7 +31,19 @@ class ChargedTurns(unittest.TestCase):
 
     def test_an_aop_run_id_in_the_message_charges_its_turn(self):
         turns = [(at(0), "start"), (at(5), "aop: run_id=abc123 finished")]
-        self.assertEqual(charged_lead_cost(turns, [(at(1), 1.0), (at(6), 5.0)], ["abc123"], at(30)), 5.0)
+        self.assertEqual(charged_lead_cost(turns, [(at(1), 1.0), (at(6), 5.0)], ["abc123"], at(0)), 6.0)
+
+    def test_a_reused_unit_name_charges_only_turns_from_the_task_s_opening_on(self):
+        # w3sim ran three tasks on one shop port, each in a unit named m8-shopvision; the third, opened at 40,
+        # is charged its own opening turn and the job message after it, and none of the earlier tasks' turns.
+        turns = [
+            (at(0), "open"),
+            (at(10), "Job m8-shopvision exited"),
+            (at(40), "open again"),
+            (at(50), "Job m8-shopvision exited"),
+        ]
+        costs = [(at(1), 1.0), (at(11), 2.0), (at(41), 4.0), (at(51), 8.0)]
+        self.assertEqual(charged_lead_cost(turns, costs, ["m8-shopvision"], at(40)), 12.0)
 
     def test_a_task_opened_during_a_user_turn_is_charged_that_turn_only(self):
         costs = [(at(12), 4.0), (at(31), 8.0)]
@@ -81,6 +93,23 @@ class SessionActivity(unittest.TestCase):
             self.assertEqual(asked, ["0123abcd"])
         with mock.patch.dict(cli.ENV, {"session_activity": lambda session: None}):
             self.assertIsNone(cli.lead_cost_from_session(config, self.task()))
+
+    def test_a_closed_task_s_cost_ends_at_its_close(self):
+        # Recomputed later, a task is not charged a later task's turns that reuse its unit's name.
+        config = make_config()
+        config.lead_session = "0123abcd"
+        turns = [*TURNS, (at(40), "Job job-port-7 succeeded")]
+        costs = [(at(1), 1.0), (at(21), 2.0), (at(41), 8.0)]
+        book = Book()
+        book.add(
+            event="open", task="t", kind="tool", **{"class": "bounded"}, actor="cheap", reason="draw", resources={}
+        )
+        book.events[-1]["at"] = at(0).isoformat()
+        book.add(event="started", task="t", units=["job-port-7"])
+        book.add(event="close", task="t", outcome="held")
+        book.events[-1]["at"] = at(25).isoformat()
+        with mock.patch.dict(cli.ENV, {"session_activity": lambda session: {"turns": turns, "costs": costs}}):
+            self.assertEqual(cli.lead_cost_from_session(config, fold(book.events).tasks["t"]), 3.0)
 
     def test_reads_turns_from_sch_and_costs_from_clanker_analytics(self):
         costs = {
