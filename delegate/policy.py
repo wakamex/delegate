@@ -507,6 +507,11 @@ def scorecard(config: Config, state: State, env: Env, only: str | None = None) -
             mine = stats.of(actor)
             final = stats.final(actor)
             scores = [t.score for t in final if t.score is not None]
+            # What the actor's closed tasks cost in all, aborted ones and redo included, against the results that
+            # stand: the economics of the choice, before any sampling or shrinking.
+            closed = [t for t in mine if t.close]
+            spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) + t.redo_cost for t in closed)
+            accepted = sum(t.outcome in ("held", "steered") for t in closed)
             rows.append(
                 {
                     "kind": name,
@@ -524,6 +529,11 @@ def scorecard(config: Config, state: State, env: Env, only: str | None = None) -
                         sum(sum(((t.close or {}).get("minutes") or {}).get("held", {}).values()) for t in mine), 1
                     ),
                     "open": sum(not t.final and t.outcome != "aborted" for t in mine),
+                    "spend": round(spend, 2),
+                    "accepted": accepted,
+                    "aborted": sum(t.outcome == "aborted" for t in closed),
+                    "unpriced": sum(t.cost("actor") is None for t in closed if t.outcome != "aborted"),
+                    "spend_per_accepted": round(spend / accepted, 2) if accepted else None,
                 }
             )
     return rows

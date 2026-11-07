@@ -264,6 +264,21 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(LedgerError, "which an amend cannot change"):
             book.state()
 
+    def test_the_scorecard_gives_spend_per_accepted_result_with_failures_and_aborts_in_the_spend(self):
+        book = Book()
+        book.task("tool", "cheap", "held", cost=1.0, lead_cost=0.5)
+        book.task("tool", "cheap", "steered", cost=2.0, lead_cost=1.5)
+        book.task("tool", "cheap", "corrected", cost=1.0, lead_cost=1.0)
+        book.task("tool", "cheap", "aborted", cost=None, lead_cost=2.0)
+        overturned = book.task("tool", "cheap", "held", cost=1.0, lead_cost=0.0)
+        book.add(event="overturn", root=overturned, redo_cost=3.0, reason="reverted")
+        row = next(r for r in policy.scorecard(self.config, book.state(), env(), "tool") if r["actor"] == "cheap")
+        # 1.5 + 3.5 + 2 + 2 + (1 + 3 redo) = 13 spent for the two results that stand
+        self.assertEqual(
+            {k: row[k] for k in ("spend", "accepted", "aborted", "unpriced", "spend_per_accepted")},
+            {"spend": 13.0, "accepted": 2, "aborted": 1, "unpriced": 0, "spend_per_accepted": 6.5},
+        )
+
     def test_a_suspend_event_takes_an_executor_out_of_the_kind_until_resumed(self):
         # As when a provider locks an account for hours where the pool check cannot see it.
         book = Book()
