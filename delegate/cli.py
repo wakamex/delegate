@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from delegate.policy import LEAD, Env, SelectError
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "delegate"
 AOP_RESULTS = STATE / "aop" / "results"
+AGENT_JOBS = STATE / "agent-jobs"  # each agent-job unit's log, where aop prints its run ids
 # The pool check: a command taking --check TARGET [--cost DOLLARS] [--need N | --need 7d=N,30d=M] that prints
 # one JSON line and exits 0 for room, 1 or 3 for none and 2 for an error, such as usage-burn. Without one,
 # pools are not checked.
@@ -103,6 +105,71 @@ def aop_models() -> list[dict]:
         return json.loads(completed.stdout).get("models") or []
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         raise UsageError(f"aop models gave no model list: {exc}") from exc
+
+
+def unit_runs(units: list[str], since: datetime, until: datetime | None = None) -> list[str]:
+    """The aop runs the agent-job units' logs name, in order, that started between SINCE and UNTIL: a unit name
+    reused by another task leaves runs in its log that are not this task's."""
+    found = []
+    for unit in units:
+        try:
+            text = (AGENT_JOBS / f"{unit}.log").read_text(errors="replace")
+        except OSError:
+            continue
+        for run in re.findall(r"run_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", text):
+            started = (ENV["aop_result"](run) or {}).get("started_at")
+            moment = parse_time(started) if started else None
+            if run not in found and moment and moment >= since and (until is None or moment <= until):
+                found.append(run)
+    return found
+
+
+def claude_home(account: str) -> str | None:
+    """The CLAUDE_CONFIG_DIR of the Claude Code home signed in as ACCOUNT, the email name usage-burn gives it: None
+    for the default home, which needs none."""
+    home = Path.home()
+    homes = {None: home / ".claude.json", **{str(p.parent): p for p in home.glob(".claude*/.claude.json")}}
+    found = []
+    for directory, settings in homes.items():
+        try:
+            email = (json.loads(settings.read_text()).get("oauthAccount") or {}).get("emailAddress") or ""
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if email.split("@")[0] == account:
+            found.append(directory)
+    if None in found:
+        return None
+    if len(found) != 1:
+        raise UsageError(f"{len(found)} Claude homes are signed in as {account}")
+    return found[0]
+
+
+def launch_job(
+    unit: str, command: list[str], environment: dict[str, str], directory: Path, minutes: float, memory: str
+):
+    """Start COMMAND in DIRECTORY as the agent-job UNIT, which reports to the lead's route when it ends."""
+    env_args = [f"{k}={v}" for k, v in environment.items()]
+    shell = f"cd {shlex.quote(str(directory))} && exec {shlex.join(command)}"
+    job = [
+        "agent-job",
+        unit,
+        "--max",
+        f"{int(minutes)}min",
+        "--mem",
+        memory,
+        "--",
+        "/usr/bin/env",
+        *env_args,
+        "sh",
+        "-c",
+        shell,
+    ]
+    try:
+        completed = subprocess.run(job, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UsageError(f"agent-job could not start {unit}: {exc}") from exc
+    if completed.returncode != 0:
+        raise UsageError(f"agent-job could not start {unit}: {completed.stderr.strip() or completed.stdout.strip()}")
 
 
 def aop_result(run_id: str) -> dict | None:
@@ -219,6 +286,9 @@ ENV = {
     "models": aop_models,
     "lead_cost": lead_cost_from_session,
     "session_activity": session_activity,
+    "unit_runs": unit_runs,
+    "launch": launch_job,
+    "claude_home": claude_home,
 }
 
 
@@ -290,6 +360,77 @@ def cmd_started(config, session, args, moment):
     if args.unit:
         event["units"] = args.unit
     return session.append(event)
+
+
+def task_runs(task, given=None, until=None) -> list[str]:
+    """A task's aop runs: those its started event and GIVEN name, and those its units' logs name, which is how the
+    runs delegate launched are found, since aop gives a run its id only once it is going."""
+    started = task.started or {}
+    runs = [r for r in [started.get("aop_run"), *(given or [])] if r]
+    for run in ENV["unit_runs"](started.get("units") or [], task.opened, until):
+        if run not in runs:
+            runs.append(run)
+    return runs
+
+
+def _launch(config, task, unit: str, aop: list[str]):
+    """Start AOP for TASK as agent-job UNIT, on the Claude account the task was opened for, and record it."""
+    environment = {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home())}
+    if account := task.open.get("account"):
+        if home := ENV["claude_home"](account):
+            environment["CLAUDE_CONFIG_DIR"] = home
+    launch = config.launch
+    ENV["launch"](unit, aop, environment, config.root / launch.directory, launch.timeout_minutes + 30, launch.memory)
+    return {"event": "started", "task": task.id, "units": [unit]}
+
+
+def cmd_run(config, session, args, moment):
+    """Start an executor's aop run for an open task: its agent, model and effort, the task's checkout as workdir,
+    its Claude account, and the kind's no-web requirement, as agent-job named after the task."""
+    task = _task(session, args.task)
+    if task.close or task.started:
+        raise UsageError(f"{task.id} is already {'closed' if task.close else 'started'}")
+    executor = config.executors.get(task.actor)
+    if executor is None:
+        raise UsageError(f"{task.id} is the lead's; delegate runs only executors")
+    launch, kind = config.launch, config.kinds[task.kind]
+    aop = ["aop", "run", "--agent", executor.agent, "--model", executor.model, "--profile", launch.profile]
+    if executor.effort:
+        aop += ["--effort", executor.effort]
+    if launch.workdir:
+        try:
+            workdir = launch.workdir.format(task=task.id, **(task.open.get("resources") or {}))
+        except KeyError as exc:
+            raise UsageError(f"launch.workdir names {exc}, which {task.id} did not reserve") from exc
+        aop += ["--workdir", workdir]
+    if "no-web" in kind.capabilities:
+        aop.append("--no-web")
+    aop += ["--timeout", str(int(launch.timeout_minutes * 60)), "--prompt-file", str(Path(args.prompt_file).resolve())]
+    event = _launch(config, task, task.id, aop)
+    return session.append({**event, "at": moment.isoformat()})
+
+
+def cmd_continue(config, session, args, moment):
+    """Resume a task's latest aop run with a follow-up prompt, as the next agent-job unit of the task."""
+    task = _task(session, args.task)
+    if task.close:
+        raise UsageError(f"{task.id} is already closed")
+    runs = task_runs(task)
+    if not runs:
+        raise UsageError(f"{task.id} has no aop run to continue; one killed before aop wrote its result cannot be")
+    units = (task.started or {}).get("units") or []
+    unit = f"{task.id}-r{len(units)}"
+    aop = [
+        "aop",
+        "resume",
+        "--timeout",
+        str(int(config.launch.timeout_minutes * 60)),
+        "--prompt-file",
+        str(Path(args.prompt_file).resolve()),
+        runs[-1],
+    ]
+    event = _launch(config, task, unit, aop)
+    return session.append({**event, "at": moment.isoformat()})
 
 
 def _evidence(values):
@@ -370,7 +511,7 @@ def cmd_close(config, session, args, moment):
     if kind.investigation and success:
         if not args.evidence or args.falsifier_checked is None:
             raise UsageError("an investigation needs --evidence and --falsifier-checked")
-    runs = [r for r in [(task.started or {}).get("aop_run"), *(args.aop_run or [])] if r]
+    runs = task_runs(task, args.aop_run, moment)
     actor_cost, run_minutes = args.actor_cost, args.run_minutes
     if task.actor != LEAD and runs and actor_cost is None:
         results = [ENV["aop_result"](r) for r in runs]
@@ -389,7 +530,11 @@ def cmd_close(config, session, args, moment):
     event.update(
         {
             "cost": {"actor": actor_cost, "lead": None if task.actor == LEAD else lead_cost},
-            "resumes": args.resumes,
+            "resumes": args.resumes
+            if args.resumes is not None
+            else sum(
+                bool(re.fullmatch(rf"{re.escape(task.id)}-r\d+", u)) for u in (task.started or {}).get("units") or []
+            ),
             "brief_error": args.brief_error,
             "minutes": {"run": run_minutes, "held": held},
             "aop_runs": runs,
@@ -472,7 +617,9 @@ def cmd_amend(config, session, args, moment):
         if args.score is not None and not 0 <= args.score <= 100:
             raise UsageError("--score is from 0 to 100")
     if args.from_aop:
-        runs = new.get("aop_runs", task.close.get("aop_runs") or [])
+        runs = new.get("aop_runs") or task.close.get("aop_runs") or task_runs(task, None, parse_time(task.close["at"]))
+        if runs != task.close.get("aop_runs"):
+            new.setdefault("aop_runs", runs)
         results = [ENV["aop_result"](r) for r in runs]
         if not runs or not all(results):
             raise UsageError(f"aop has no archived result for every run of {task.id}: {', '.join(runs) or 'none'}")
@@ -579,6 +726,8 @@ COMMANDS = {
     "verdict": cmd_verdict,
     "overturn": cmd_overturn,
     "amend": cmd_amend,
+    "run": cmd_run,
+    "continue": cmd_continue,
     "suspend": cmd_actor_event,
     "resume": cmd_actor_event,
     "drop": cmd_actor_event,
@@ -628,7 +777,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("close", help="close a task once its result has landed or been discarded")
     judged(s, ("held", "steered", "corrected", "aborted", "awaiting"))
     s.add_argument("--brief-error")
-    s.add_argument("--resumes", type=int, default=0)
+    s.add_argument("--resumes", type=int, help="resumes in the session (default: the units delegate continue started)")
     s.add_argument("--actor-cost", type=float, help="the actor's cost, if not from aop's records")
     s.add_argument("--lead-cost", type=float)
     s.add_argument("--lead-session", help="the lead's session id (default: DELEGATE_LEAD_SESSION, then the config)")
@@ -653,6 +802,14 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--redo-cost", type=float, required=True)
     s.add_argument("--reason", required=True)
     s.add_argument("--found-by", metavar="TASK")
+
+    s = sub.add_parser("run", help="start an open task's executor in aop, as agent-job named after the task")
+    s.add_argument("task")
+    s.add_argument("--prompt-file", required=True, help="the prompt the executor is given")
+
+    s = sub.add_parser("continue", help="resume an open task's latest aop run with a follow-up prompt")
+    s.add_argument("task")
+    s.add_argument("--prompt-file", required=True)
 
     s = sub.add_parser("amend", help="correct a closed task's costs, minutes, runs, commits, report or score")
     s.add_argument("task")

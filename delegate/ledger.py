@@ -128,6 +128,10 @@ def fold(events: list[dict]) -> State:
         if task is None:
             raise LedgerError(f"line {number} names unknown task {event.get('task')}")
         if kind == "started":
+            # A resume starts another unit of the same task: its units add to those started before.
+            if task.started:
+                units = [*(task.started.get("units") or []), *(event.get("units") or [])]
+                event = {**task.started, **event, "units": units}
             task.started = event
         elif kind == "close":
             task.close = event

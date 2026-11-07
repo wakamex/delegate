@@ -89,6 +89,48 @@ class PoolCheckTests(unittest.TestCase):
         self.assertIn("timed out after 60 seconds", result["reasons"][0])
 
 
+class LaunchTests(unittest.TestCase):
+    def test_a_reused_unit_s_log_gives_only_the_runs_that_started_in_the_task_s_window(self):
+        jobs = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, jobs)
+        old, new = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+        (jobs / "m8-shop.log").write_text(f"aop: run_id={old}\naop: run_id={new}\n")
+        started = {old: NOW - timedelta(hours=3), new: NOW + timedelta(minutes=5)}
+        result = {"aop_result": lambda run: {"started_at": started[run].isoformat()}}
+        with mock.patch.object(cli, "AGENT_JOBS", jobs), mock.patch.dict(cli.ENV, result):
+            self.assertEqual(cli.unit_runs(["m8-shop", "missing"], NOW), [new])
+            self.assertEqual(cli.unit_runs(["m8-shop"], NOW - timedelta(hours=4), NOW), [old])
+
+    def test_claude_home_finds_the_home_signed_in_as_the_account(self):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home)
+        (home / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "first@example.com"}}))
+        (home / ".claude-b").mkdir()
+        (home / ".claude-b" / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {"emailAddress": "second@example.com"}})
+        )
+        with mock.patch.object(cli.Path, "home", lambda: home):
+            self.assertIsNone(cli.claude_home("first"))
+            self.assertEqual(cli.claude_home("second"), str(home / ".claude-b"))
+            with self.assertRaisesRegex(cli.UsageError, "0 Claude homes"):
+                cli.claude_home("third")
+
+    def test_launch_starts_an_agent_job_running_the_command_in_its_directory(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(cli.subprocess, "run", run):
+            cli.launch_job(
+                "port-0140", ["aop", "run", "--prompt-file", "p q.txt"], {"HOME": "/h"}, Path("/w"), 240, "12G"
+            )
+        self.assertEqual(calls[0][:7], ["agent-job", "port-0140", "--max", "240min", "--mem", "12G", "--"])
+        self.assertEqual(calls[0][-1], "cd /w && exec aop run --prompt-file 'p q.txt'")
+        self.assertIn("HOME=/h", calls[0])
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
@@ -178,6 +220,63 @@ class CliTests(unittest.TestCase):
         self.assertIn(
             "no lead score", self.run_cli("amend", tool["task"], "--score", "50", "--reason", "x")[1]["error"]
         )
+
+    def test_run_launches_the_executor_and_close_finds_its_runs_in_the_unit_logs(self):
+        # The run id exists only once aop is going, so close reads it from the agent-job log of the unit delegate
+        # started, as w3sim's lead once had to copy it by hand and 43 closes went without it.
+        config = self.directory / "delegate.toml"
+        config.write_text(config.read_text() + '\n[launch]\nworkdir = "/code/{checkout}"\ndirectory = "team"\n')
+        launched = []
+        jobs = self.directory / "agent-jobs"
+        jobs.mkdir()
+        run = json.loads(FIXTURE.read_text())
+        (self.results / f"{run['run_id']}.json").write_text(json.dumps({**run, "started_at": NOW.isoformat()}))
+        patches = {"launch": lambda *a: launched.append(a), "claude_home": lambda account: "/home/x/.claude-b"}
+        with mock.patch.dict(cli.ENV, patches), mock.patch.object(cli, "AGENT_JOBS", jobs):
+            _, chosen = self.run_cli("select", "tool", "bounded", "--resources", "checkout")
+            task = chosen["task"]
+            prompt = self.directory / "prompt.txt"
+            prompt.write_text("do it")
+            code, started = self.run_cli("run", task, "--prompt-file", str(prompt))
+            self.assertEqual((code, started["units"]), (0, [task]))
+            unit, aop, environment, directory, minutes, memory = launched[0]
+            self.assertEqual(unit, task)
+            self.assertEqual(aop[:2], ["aop", "run"])
+            self.assertIn("--workdir", aop)
+            self.assertEqual(aop[aop.index("--workdir") + 1], "/code/a")
+            self.assertEqual(directory, self.directory / "team")
+            self.assertIn("already started", self.run_cli("run", task, "--prompt-file", str(prompt))[1]["error"])
+            self.assertIn("no aop run", self.run_cli("continue", task, "--prompt-file", str(prompt))[1]["error"])
+            (jobs / f"{task}.log").write_text(f"aop: run_id={run['run_id']} calculated_cost=$2.5\n")
+            code, resumed = self.run_cli("continue", task, "--prompt-file", str(prompt))
+            self.assertEqual((code, resumed["units"]), (0, [f"{task}-r1"]))
+            self.assertEqual(launched[1][1][:2], ["aop", "resume"])
+            self.assertEqual(launched[1][1][-1], run["run_id"])
+            code, closed = self.run_cli("close", task, "--outcome", "held", "--lead-cost", "0")
+        self.assertEqual(
+            (code, closed["aop_runs"], closed["cost"]["actor"], closed["resumes"]), (0, [run["run_id"]], 2.5, 1)
+        )
+        folded = cli.Ledger(self.directory / "ledger.jsonl").read().tasks[task]
+        self.assertEqual(folded.started["units"], [task, f"{task}-r1"])
+
+    def test_amend_from_aop_finds_runs_a_close_left_out_in_the_unit_logs(self):
+        jobs = self.directory / "agent-jobs"
+        jobs.mkdir()
+        run = json.loads(FIXTURE.read_text())
+        (self.results / f"{run['run_id']}.json").write_text(json.dumps({**run, "started_at": NOW.isoformat()}))
+        with mock.patch.object(cli, "AGENT_JOBS", jobs):
+            _, chosen = self.run_cli("select", "tool", "bounded")
+            task = chosen["task"]
+            self.run_cli("started", task, "--unit", "m8-shop")
+            (jobs / "m8-shop.log").write_text(f"aop: run_id={run['run_id']}\n")
+            # As in w3sim from November 2 to 4: closed without the run id, so with no actor cost.
+            with mock.patch.dict(cli.ENV, {"unit_runs": lambda *a: []}):
+                _, closed = self.run_cli("close", task, "--outcome", "held", "--lead-cost", "0")
+            self.assertIsNone(closed["cost"]["actor"])
+            code, amend = self.run_cli("amend", task, "--from-aop", "--reason", "closed without its aop run")
+        self.assertEqual(code, 0)
+        self.assertEqual(amend["changes"]["aop_runs"], {"old": [], "new": [run["run_id"]]})
+        self.assertEqual(amend["changes"]["cost.actor"]["new"], 2.5)
 
     def test_repeated_list_options_append(self):
         _, chosen = self.run_cli("select", "tool", "bounded")

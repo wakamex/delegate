@@ -132,6 +132,7 @@ For each kind and class, show each actor, the lead included, as a point: cost pe
 A small command, `delegate`, does the arithmetic, so no lead does it in its own context:
 
 - `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--assign EXECUTOR --why ..]`: chooses delegate, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
+- `run` and `continue`: start and resume the chosen executor's aop run, so the ledger names every run without the lead copying ids;
 - `started`, `close`, `verdict`, `overturn`, `amend`, `suspend`, `resume`, `drop`: append the events above, `close` filling costs from aop's records and clanker-analytics;
 - `scorecard`: prints each kind's points.
 

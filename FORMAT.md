@@ -29,6 +29,13 @@ runs = 2                                 # the most of the project's tasks open 
 [pools.opencode]
 need = { "5h" = 25, "7d" = 25, "30d" = 6 }  # or the points of each window length, when they differ
 
+[launch]                                 # how delegate run starts an executor's aop run
+workdir = "/code/{checkout}"             # aop's --workdir, from the task's reserved resources
+directory = "tmp/team"                   # where aop runs, relative to this file (default ".")
+profile = "host"                         # aop's --profile (default "host")
+timeout_minutes = 210                    # aop's --timeout; the agent-job unit gets 30 minutes more
+memory = "12G"                           # the agent-job unit's memory cap
+
 [executors.terra-max]
 agent = "codex"
 model = "gpt-6.1-terra"
@@ -127,8 +134,10 @@ A task's record is its events folded in order: later fields replace earlier ones
 | Command | Writes | Does |
 |---|---|---|
 | `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--assign EXECUTOR --why ..] [--since TIME]` | `open`, except for wait; `drop` when the drop rule fires | prints `delegate`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`; passing it back as `--since` on the next try is how the wait deadline is measured. An `error` answer is a wait in which a pool check could not answer, with the failure in `error`, and exits 2 |
-| `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | |
-| `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript |
+| `delegate run TASK --prompt-file PATH` | `started` | starts the task's executor in aop as the agent-job unit named after the task: its agent, model and effort, `[launch]`'s workdir and profile, `--no-web` when the kind requires it, and the Claude home of the account the open names. The unit reports to the lead's route when it ends |
+| `delegate continue TASK --prompt-file PATH` | `started` | resumes the task's latest aop run with a follow-up prompt, as unit `TASK-rN` on the same account |
+| `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | for a run started some other way; a later started event adds its units to the task's |
+| `delegate close TASK --outcome ..` | `close` | fills `cost` from aop's archived results and the lead's transcript. The task's aop runs are those `started` and `--aop-run` name and those its units' agent-job logs name that started within the task's time, since aop gives a run its id only once it is going; `resumes` defaults to the units `continue` started |
 | `delegate verdict TASK --outcome ..` | `verdict` | |
 | `delegate overturn ROOT --redo-cost N --reason .. [--found-by TASK]` | `overturn` | ROOT is the task whose commit introduced the overturned code |
 | `delegate amend TASK --reason .. [--actor-cost N] [--lead-cost N] [--run-minutes N] [--aop-run ID..] [--commit SHA..] [--report PATH] [--score N] [--score-reason ..] [--from-aop] [--from-lead-session [--lead-session ID]] [--by WHO]` | `amend` | corrects a closed task's fields, recording each old and new value; `--from-aop` refills actor cost and run minutes from aop's records of its runs, and `--from-lead-session` its lead cost from the lead's session; a list option replaces the recorded list |

@@ -52,6 +52,17 @@ class Kind:
 
 
 @dataclass
+class Launch:
+    """How delegate starts an executor's aop run: the [launch] table."""
+
+    workdir: str | None = None  # the run's --workdir, formatted with the task's reserved resources, such as {checkout}
+    directory: str = "."  # where aop runs, relative to the config: its .aop state and prompt files live there
+    profile: str = "host"
+    timeout_minutes: float = 210
+    memory: str = "12G"
+
+
+@dataclass
 class Config:
     path: Path
     project: str
@@ -68,6 +79,7 @@ class Config:
     # The most of the project's tasks open on a pool at once, for a limit its reading cannot show.
     pool_runs: dict[str, int] = field(default_factory=dict)
     candidate_families: list[str] = field(default_factory=list)
+    launch: Launch = field(default_factory=Launch)
 
     @property
     def root(self) -> Path:
@@ -178,6 +190,7 @@ def load(path: Path) -> Config:
         "kinds",
         "pools",
         "candidates",
+        "launch",
     }
     if unknown := set(data) - known:
         raise ConfigError(f"unknown keys in {path.name}: {', '.join(sorted(unknown))}")
@@ -253,6 +266,11 @@ def load(path: Path) -> Config:
             if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
                 raise ConfigError(f"pools.{name}.runs must be a whole number of at least 1")
             pool_runs[name] = runs
+    launch = data.get("launch", {})
+    _known(launch, {"workdir", "directory", "profile", "timeout_minutes", "memory"}, "launch")
+    for key in ("workdir", "directory", "profile", "memory"):
+        if key in launch and (not isinstance(launch[key], str) or not launch[key]):
+            raise ConfigError(f"launch.{key} must be text")
     return Config(
         path=path,
         project=data["project"],
@@ -267,6 +285,13 @@ def load(path: Path) -> Config:
         pool_need=pool_need,
         pool_runs=pool_runs,
         candidate_families=families,
+        launch=Launch(
+            workdir=launch.get("workdir"),
+            directory=launch.get("directory", "."),
+            profile=launch.get("profile", "host"),
+            timeout_minutes=_number(launch.get("timeout_minutes", 210), "launch.timeout_minutes", 1),
+            memory=launch.get("memory", "12G"),
+        ),
     )
 
 
