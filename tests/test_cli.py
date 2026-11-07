@@ -278,6 +278,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(amend["changes"]["aop_runs"], {"old": [], "new": [run["run_id"]]})
         self.assertEqual(amend["changes"]["cost.actor"]["new"], 2.5)
 
+    def test_a_run_aop_could_not_price_leaves_the_cost_unknown(self):
+        # aop has no price for Devin's swe-2 or Cursor's composer models, so their results carry no calculated cost.
+        run = json.loads(FIXTURE.read_text())
+        unpriced = {**run, "run_id": "0" * 8 + run["run_id"][8:], "calculated_cost": None}
+        for result in (run, unpriced):
+            (self.results / f"{result['run_id']}.json").write_text(json.dumps(result))
+        _, chosen = self.run_cli("select", "tool", "bounded")
+        task = chosen["task"]
+        code, closed = self.run_cli(
+            "close", task, "--outcome", "held", "--lead-cost", "0", "--aop-run", run["run_id"], unpriced["run_id"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIsNone(closed["cost"]["actor"])
+        self.assertGreater(closed["minutes"]["run"], 0)
+        # A close that counted such a run as free is corrected to unknown.
+        self.run_cli("amend", task, "--actor-cost", "0", "--reason", "as recorded before")
+        code, amend = self.run_cli("amend", task, "--from-aop", "--reason", "aop priced a run at nothing")
+        self.assertEqual((code, amend["changes"]["cost.actor"]), (0, {"old": 0.0, "new": None}))
+
     def test_repeated_list_options_append(self):
         _, chosen = self.run_cli("select", "tool", "bounded")
         code, closed = self.run_cli(

@@ -180,6 +180,17 @@ def aop_result(run_id: str) -> dict | None:
         return None
 
 
+def runs_cost(results: list[dict]) -> float | None:
+    """What aop calculated the runs cost, or None when it priced any of them at nothing: a model aop has no price
+    for, or a run that reported no usage, is unknown rather than free."""
+    amounts = [(r.get("calculated_cost") or {}).get("amount_usd") for r in results]
+    return None if any(a is None for a in amounts) else sum(float(a) for a in amounts)
+
+
+def runs_minutes(results: list[dict]) -> float:
+    return sum(float(r.get("duration_seconds") or 0) for r in results) / 60
+
+
 def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
     """Sum the lead cost charged to a task: each turn whose triggering message names one of NAMES (its agent-job
     units or aop runs), and its part of the turn in which it was opened, which holds its brief. Every cost row
@@ -516,9 +527,9 @@ def cmd_close(config, session, args, moment):
     if task.actor != LEAD and runs and actor_cost is None:
         results = [ENV["aop_result"](r) for r in runs]
         if all(results):
-            actor_cost = sum(float((r.get("calculated_cost") or {}).get("amount_usd") or 0) for r in results)
+            actor_cost = runs_cost(results)
             if run_minutes is None:
-                run_minutes = sum(float(r.get("duration_seconds") or 0) for r in results) / 60
+                run_minutes = runs_minutes(results)
     lead_cost = (
         args.lead_cost
         if args.lead_cost is not None
@@ -623,10 +634,8 @@ def cmd_amend(config, session, args, moment):
         results = [ENV["aop_result"](r) for r in runs]
         if not runs or not all(results):
             raise UsageError(f"aop has no archived result for every run of {task.id}: {', '.join(runs) or 'none'}")
-        new.setdefault(
-            "cost.actor", sum(float((r.get("calculated_cost") or {}).get("amount_usd") or 0) for r in results)
-        )
-        new.setdefault("minutes.run", sum(float(r.get("duration_seconds") or 0) for r in results) / 60)
+        new.setdefault("cost.actor", runs_cost(results))
+        new.setdefault("minutes.run", runs_minutes(results))
     if args.from_lead_session:
         others = [t.opened for t in session.state.tasks.values() if t.id != task.id]
         runs = new.get("aop_runs", task.close.get("aop_runs") or [])
