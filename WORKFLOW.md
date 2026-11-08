@@ -62,7 +62,7 @@ Each kind is on or off, with the reason recorded. Each class of a kind takes the
 
 ### 1. Write a self-contained brief
 
-The brief states the goal, the checkable rules the result must meet, how to verify it, a stop condition, and a cap on tokens that ends the run. For a large change it states the design decision and a narrow stop; an executor left to choose the design is where steering resumes and their cost go. Any sensitive material the task needs is authorized for the executor's provider before it is sent.
+The brief states the goal, the checkable rules the result must meet, how to verify it, a stop condition, and a cap on tokens that ends the run. For a large change it states the design decision and a narrow stop; an executor left to choose the design is where steering resumes and their cost go.
 
 ### 2. Decide whether to delegate this task
 
