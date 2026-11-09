@@ -1,12 +1,12 @@
 [project]
 name = "delegate"
-version = "0.1.0"
+version = "0.2.0"
 description = "Choose which agent takes each delegated task, and keep the ledger of how it went"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["numpy>=2"]
 
 [project.scripts]
 delegate = "delegate.cli:main"

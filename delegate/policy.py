@@ -1,243 +1,380 @@
-"""The workflow's arithmetic: what each actor has done, who may take a task, and who gets it."""
+"""Choosing an actor for a task, from one model of every actor on every host project's tasks.
 
+The choice minimizes expected cost per standing result, per unit of value, at one joint draw from the model's
+posterior (Thompson sampling), among the actors that capacity and a person's suspensions allow. Nothing else gates
+an actor: an unreliable one, or one with integrity defects, costs more per standing result and loses the draw.
+"""
+
+import hashlib
+import math
+import pickle
 import random
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from statistics import median
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
-from delegate.config import Config, ConfigError, Kind, parse_resource_spec
-from delegate.ledger import State, Task
+import numpy as np
 
-LEAD = "lead"
-DROP_CONFIDENCE = 0.95  # drop when cost per success is this likely to exceed the lead's
-FALLBACK_CONFIDENCE = 0.90  # drop when the success rate is this likely below one half
-MIN_VERDICTS = 5  # verdicts an actor needs before it is compared
-DRAWS = 4000
+from . import __version__, epochs
+from .config import LEAD, Actor, Config, ConfigError, Kind, load, parse_resource_spec
+from .ledger import State, Task, parse_time
+from .model import COUNT, DRAWS, LOGIT, TWEEDIE, Head, Row, fit
+
+SCARCITY_FLOOR = 0.05  # quota due to expire unused still costs something, so relative prices hold
+DEFAULT_PRICE = 3.0  # the cost prior for an actor with no price in the roster
+FAILURE_DAMAGE = 2.0  # an integrity defect costs this many corrections: rework and re-check
+CAUSES = ("difficulty", "quota", "capability", "user")
 
 
 class SelectError(Exception):
-    """A select that cannot be made as asked."""
+    pass
 
 
 @dataclass
 class Env:
-    """What select needs from outside the ledger, injectable for tests."""
+    """What select needs from outside the ledgers, injectable for tests."""
 
-    pool: callable  # (target, dollars, need) -> {"room": bool, "marginal": share of the run's dollars it costs}
+    pool: callable  # (target, dollars) -> {"room": bool, "marginal": share, "state": ..., "reasons": [...]}
     rng: random.Random
+    cache: Path | None = None
 
 
-# ---- what an actor has done ----------------------------------------------------------------------
+@dataclass
+class World:
+    """Every host project's tasks, and the host's actors."""
+
+    config: Config
+    projects: dict[str, tuple[Config, State]]
+    events: list[tuple[str, dict]] = field(default_factory=list)  # (project, event) for non-task events
+
+    def tasks(self):
+        for project, (config, state) in self.projects.items():
+            for task in state.tasks.values():
+                yield project, config, task
 
 
-def kind_tasks(state: State, kind: str) -> list[Task]:
-    return [state.tasks[t] for t in state.order if state.tasks[t].kind == kind]
-
-
-def success(task: Task, kind: Kind) -> float | None:
-    """A final task's success, from 0 to 1: a lead score counts as its fraction."""
-    if not task.final:
-        return None
-    if task.outcome == "corrected":
-        return 0.0
-    if kind.measure == "lead-score" and task.score is not None:
-        return task.score / 100
-    return 1.0
-
-
-def counts(tasks: list[Task], kind: Kind, prior: float = 0.5) -> tuple[float, float]:
-    """Beta(a, b) over final tasks: successes and failures plus two prior tasks split at the PRIOR success rate,
-    Beta(1, 1) at the default one half."""
-    values = [v for t in tasks if (v := success(t, kind)) is not None]
-    return 2 * prior + sum(values), 2 * (1 - prior) + sum(1 - v for v in values)
-
-
-def shrunk(values: list[float], prior: float | None) -> float | None:
-    """(n times the mean plus one prior task) over (n plus 1); the mean alone without a prior."""
-    if prior is None:
-        return sum(values) / len(values) if values else None
-    return (sum(values) + prior) / (len(values) + 1)
-
-
-def mean(values: list[float]) -> float | None:
-    return sum(values) / len(values) if values else None
-
-
-class Stats:
-    """Per-actor figures for one kind, from the ledger."""
-
-    def __init__(self, config: Config, state: State, kind: Kind, env: Env):
-        self.config, self.state, self.kind, self.env = config, state, kind, env
-        self.tasks = kind_tasks(state, kind.name)
-
-    def of(self, actor: str) -> list[Task]:
-        return [t for t in self.tasks if t.actor == actor]
-
-    def final(self, actor: str) -> list[Task]:
-        return [t for t in self.of(actor) if t.final]
-
-    def in_class(self, actor: str, cls: str) -> list[Task]:
-        return [t for t in self.of(actor) if t.cls == cls]
-
-    def success_counts(self, actor: str, cls: str) -> tuple[float, float]:
-        """Beta(a, b) of the actor's success in the class, its prior the actor's success rate in the kind's other
-        classes, so a class it has not done starts from how it does in the others, and its own verdicts there soon
-        decide."""
-        a, b = counts([t for t in self.final(actor) if t.cls != cls], self.kind)
-        return counts([t for t in self.final(actor) if t.cls == cls], self.kind, a / (a + b))
-
-    def _costs(self, tasks: list[Task], part: str) -> list[float]:
-        return [c for t in tasks if (c := t.cost(part)) is not None]
-
-    def actor_prior(self, actor: str) -> float | None:
-        """The actor's own mean actor cost over all its tasks, else the kind's mean actor cost."""
-        own = [c for t in self.state.tasks.values() if t.actor == actor and (c := t.cost("actor")) is not None]
-        if own:
-            return mean(own)
-        others = [t for t in self.tasks if (t.actor == LEAD) == (actor == LEAD)]
-        return mean(self._costs(others, "actor"))
-
-    def cost_parts(self, actor: str, cls: str) -> tuple[float | None, float, float]:
-        """Expected actor, lead and redo cost of one task, each a mean over the actor's tasks in the class shrunk
-        toward its mean in the kind's other classes, itself shrunk toward a prior; the actor part None when unknown."""
-        here = self.in_class(actor, cls)
-        others = [t for t in self.of(actor) if t.cls != cls]
-
-        def part(costs, prior):
-            return shrunk(costs(here), shrunk(costs(others), prior))
-
-        actor_part = part(lambda ts: self._costs(ts, "actor"), self.actor_prior(actor))
-        delegated = [t for t in self.tasks if t.actor != LEAD]
-        lead_part = 0.0
-        if actor != LEAD:
-            lead_part = part(lambda ts: self._costs(ts, "lead"), mean(self._costs(delegated, "lead"))) or 0.0
-        redo_prior = mean([t.redo_cost for t in self.tasks if t.final]) or 0.0
-        redo_part = part(lambda ts: [t.redo_cost for t in ts if t.final], redo_prior) or 0.0
-        return actor_part, lead_part, redo_part
-
-    def marginal_cost(self, actor: str, cls: str, marginal: float = 1.0) -> float | None:
-        """Expected cost of one task with the actor's part priced at MARGINAL."""
-        actor_part, lead_part, redo_part = self.cost_parts(actor, cls)
-        return None if actor_part is None else actor_part * marginal + lead_part + redo_part
-
-    def expected_cost(self, actor: str, cls: str) -> float | None:
-        """Expected total cost of one task: shrunk actor, lead and redo costs."""
-        actor_part, lead_part, redo_part = self.cost_parts(actor, cls)
-        return None if actor_part is None else actor_part + lead_part + redo_part
-
-    def yield_factor(self, actor: str) -> float:
-        """Yield kinds: the shrunk mean yield per successful task; 1 otherwise."""
-        if self.kind.measure != "yield":
-            return 1.0
-
-        def per_success(tasks):
-            done = [t for t in tasks if t.final and t.outcome != "corrected" and t.yield_ is not None]
-            return [t.yield_ for t in done]
-
-        prior = mean(per_success(self.tasks)) or 1.0
-        return max(shrunk(per_success(self.of(actor)), prior), 1e-9)
-
-    def cost_per_success_draws(
-        self, actor: str, cls: str, rng: random.Random, n: int = DRAWS, marginal: float = 1.0
-    ) -> list[float]:
-        """Draws of cost per success, the actor's part priced at MARGINAL, the share of it the run really spends."""
-        cost = self.marginal_cost(actor, cls, marginal)
-        cost = 1.0 if cost is None else cost
-        a, b = self.success_counts(actor, cls)
-        factor = self.yield_factor(actor)
-        return [cost / (max(rng.betavariate(a, b), 1e-12) * factor) for _ in range(n)]
-
-    def cost_per_success(self, actor: str, cls: str) -> float | None:
-        cost = self.expected_cost(actor, cls)
-        if cost is None:
-            return None
-        a, b = self.success_counts(actor, cls)
-        return cost / (a / (a + b) * self.yield_factor(actor))
-
-
-# ---- executor standing in a kind -----------------------------------------------------------------
-
-
-def _events(state: State, name: str, kind: str, actor: str | None = None):
-    for event in state.events:
-        if event.get("event") != name:
+def load_world(config: Config, state: State, read) -> World:
+    """The current project's state (already read, under its lock) and every other host project's, via READ."""
+    projects = {config.project: (config, state)}
+    for path in config.host.projects:
+        if path == config.path.resolve():
             continue
-        if event.get("kind") == kind and (actor is None or event.get("actor") == actor):
-            yield event
+        try:
+            other = load(path, config.host)
+        except ConfigError:
+            continue
+        if other.project in projects:
+            continue
+        projects[other.project] = (other, read(other.ledger))
+    world = World(config, projects)
+    for project, (_, st) in projects.items():
+        for event in st.events:
+            if event.get("event") in ("epoch", "suspend", "resume", "drop"):
+                world.events.append((project, event))
+    return world
 
 
-def last_time(events) -> datetime | None:
-    times = [datetime.fromisoformat(e["at"]) for e in events]
-    return max(times) if times else None
+# ---- the rows the model learns from ---------------------------------------------------------------
 
 
-def judged_at(task: Task) -> datetime:
-    record = task.verdict or task.close
-    return datetime.fromisoformat(record["at"])
+def _actor(config: Config, name: str) -> Actor | None:
+    if name == LEAD:
+        return config.host.lead
+    return config.host.actors.get(name)
 
 
-def standing(stats: Stats, actor: str) -> str:
-    """active, dropped or suspended. Every configured executor is active in every kind until a rule takes it out:
-    its record in each class, not a trial, decides how much work it gets."""
-    kind, state = stats.kind, stats.state
-    resumed = last_time(_events(state, "resume", kind.name, actor))
-    dropped = last_time(_events(state, "drop", kind.name, actor))
-    if dropped and (resumed is None or dropped > resumed):
-        return "dropped"
-    suspended = last_time(_events(state, "suspend", kind.name, actor))
-    if suspended and (resumed is None or suspended > resumed):
-        return "suspended"
-    if kind.check != "gated":
-        for task in stats.final(actor):
-            if task.defect == "integrity" and (resumed is None or judged_at(task) > resumed):
-                return "suspended"
-    return "active"
+def _epochs(world: World, actor: str, signal: str, before: datetime) -> int:
+    return sum(
+        1
+        for _, e in world.events
+        if e.get("event") == "epoch"
+        and e.get("actor") == actor
+        and e.get("signal") == signal
+        and parse_time(e["at"]) < before
+    )
 
 
-def prob_exceeds(draws_a: list[float], draws_b: list[float]) -> float:
-    return sum(x > y for x, y in zip(draws_a, draws_b, strict=True)) / len(draws_a)
+def _versions(world: World) -> dict[tuple[str, str], int]:
+    """Each harness version's rank, by first appearance."""
+    first: dict[str, list[str]] = {}
+    for _, _, task in sorted(world.tasks(), key=lambda x: x[2].opened):
+        version = (task.started or {}).get("harness_version")
+        actor = _actor(world.config, task.actor)
+        if version and actor:
+            seen = first.setdefault(actor.agent, [])
+            if version not in seen:
+                seen.append(version)
+    return {(h, v): i for h, vs in first.items() for i, v in enumerate(vs)}
 
 
-def beta_below(a: float, b: float, threshold: float, rng: random.Random, n: int = DRAWS) -> float:
-    return sum(rng.betavariate(a, b) < threshold for _ in range(n)) / n
+def row(
+    world: World,
+    project: str,
+    kind: Kind,
+    cls: str,
+    actor: str,
+    at: datetime,
+    signal: str,
+    task: Task | None = None,
+    versions=None,
+) -> Row:
+    a = _actor(world.config, actor)
+    version = None
+    if a and task and versions is not None:
+        v = (task.started or {}).get("harness_version")
+        version = versions.get((a.agent, v)) if v else None
+    retry = 1.0 if task is not None and task.open.get("retry_of") else 0.0
+    hard = 1.0 if task is not None and task.open.get("cause") == "difficulty" else 0.0
+    return Row(
+        actor=actor,
+        project=project,
+        kind=kind.name,
+        cls=cls,
+        check=kind.check,
+        family=a.family if a else None,
+        model=a.model if a else None,
+        effort=a.effort_rank if a else None,
+        harness=a.agent if a else None,
+        version=version,
+        epoch=_epochs(world, actor, signal, at),
+        retry=retry,
+        hard=hard,
+    )
 
 
-def should_drop(stats: Stats, actor: str, cls: str) -> str | None:
-    """The drop rule's reason, or None.
-
-    An executor is dropped when its success rate over the kind is probably below one half, or,
-    once it and the lead each have MIN_VERDICTS verdicts, when doing the task as the lead is probably cheaper per
-    success. It is not dropped for costing more than another executor: the draw already prefers the cheaper one,
-    and a pool the cheapest executor runs on can be exhausted.
-    """
-    rng = random.Random(f"{stats.kind.name}:{actor}:{len(stats.state.events)}")
-    mine = stats.final(actor)
-    if mine:
-        a, b = counts(mine, stats.kind)
-        p = beta_below(a, b, 0.5, rng)
-        if p > FALLBACK_CONFIDENCE:
-            return f"success rate {p:.0%} likely below one half"
-    if len(mine) >= MIN_VERDICTS and len(stats.final(LEAD)) >= MIN_VERDICTS:
-        p = prob_exceeds(stats.cost_per_success_draws(actor, cls, rng), stats.cost_per_success_draws(LEAD, cls, rng))
-        if p > DROP_CONFIDENCE:
-            return f"cost per success {p:.0%} likely above the lead's"
-    return None
+def _price(config: Config, actor: str) -> float:
+    a = _actor(config, actor)
+    if a and a.price:
+        return a.price
+    prices = [x.price for x in config.host.actors.values() if x.price]
+    return float(np.median(prices)) if prices else DEFAULT_PRICE
 
 
-# ---- resources -----------------------------------------------------------------------------------
+@dataclass
+class Heads:
+    q: Head | None = None
+    integrity: Head | None = None
+    score: Head | None = None
+    yield_: Head | None = None
+    cost: Head | None = None
+    brief: Head | None = None
+    post: Head | None = None
+    minutes: Head | None = None
+    id: str = ""
 
 
-def reserve(config: Config, state: State, specs: list[str]) -> tuple[dict | None, str | None]:
-    """The reservation for SPECS against tasks still holding theirs, or None and the busy resource."""
+def fit_id(world: World) -> str:
+    """Changes only when an outcome, cost or epoch arrives, so opens reuse the fit."""
+    digest = hashlib.sha256(__version__.encode())
+    if world.config.host.path and world.config.host.path.is_file():
+        digest.update(world.config.host.path.read_bytes())
+    for project in sorted(world.projects):
+        config, state = world.projects[project]
+        digest.update(config.path.read_bytes())
+        for event in state.events:
+            if event.get("event") in ("close", "verdict", "amend", "overturn", "epoch", "started"):
+                digest.update(repr(sorted(event.items())).encode())
+    return digest.hexdigest()[:16]
+
+
+def fit_heads(world: World, cache: Path | None = None) -> Heads:
+    ident = fit_id(world)
+    path = cache / f"fit-{ident}.pkl" if cache else None
+    if path and path.is_file():
+        try:
+            return pickle.loads(path.read_bytes())
+        except Exception:  # noqa: BLE001 - a bad cache is refitted
+            pass
+    versions = _versions(world)
+    data: dict[str, list] = {h: [] for h in ("q", "integrity", "score", "yield", "cost", "brief", "post", "minutes")}
+    for project, config, task in world.tasks():
+        kind = config.kinds.get(task.kind)
+        if kind is None:
+            continue
+        cls = task.cls if task.cls in kind.classes else kind.classes[0]
+        r_success = row(world, project, kind, cls, task.actor, task.opened, "success", task, versions)
+        r_cost = row(world, project, kind, cls, task.actor, task.opened, "cost", task, versions)
+        stood = task.stood
+        if stood is not None:
+            data["q"].append((r_success, float(stood)))
+            if task.actor != LEAD:
+                data["integrity"].append((r_success, float(task.integrity)))
+            if stood and kind.measure == "lead-score" and task.score is not None:
+                data["score"].append((r_success, min(max(task.score / 100.0, 0.0), 1.0)))
+            if stood and kind.measure == "yield" and task.yield_ is not None:
+                data["yield"].append((r_success, max(task.yield_, 0.0)))
+        if task.close and task.outcome != "aborted":
+            actor_cost = task.cost("actor")
+            if actor_cost is not None:
+                data["cost"].append((r_cost, actor_cost, math.log(_price(config, task.actor))))
+            if task.actor != LEAD:
+                brief = task.cost("brief")
+                lead = task.cost("lead")
+                if brief is not None:
+                    data["brief"].append((r_cost, brief))
+                if lead is not None and stood is not None:
+                    data["post"].append((r_cost, max(lead - (brief or 0.0), 0.0), 0.0 if stood else 1.0))
+            minutes = (task.closed_at - task.opened).total_seconds() / 60
+            data["minutes"].append((r_cost, max(minutes, 0.0)))
+    heads = Heads(id=ident)
+    if len(data["q"]) >= 3:
+        heads.q = fit(LOGIT, [r for r, _ in data["q"]], np.array([y for _, y in data["q"]]), prior_mean=2.2)
+    if len(data["integrity"]) >= 3:
+        rows_ = [r for r, _ in data["integrity"]]
+        heads.integrity = fit(LOGIT, rows_, np.array([y for _, y in data["integrity"]]), prior_mean=-4.0)
+    if len(data["score"]) >= 3:
+        heads.score = fit(LOGIT, [r for r, _ in data["score"]], np.array([y for _, y in data["score"]]), prior_mean=1.0)
+    if len(data["yield"]) >= 3:
+        heads.yield_ = fit(COUNT, [r for r, _ in data["yield"]], np.array([y for _, y in data["yield"]]), budget=1.0)
+    if len(data["cost"]) >= 3:
+        heads.cost = fit(
+            TWEEDIE,
+            [r for r, _, _ in data["cost"]],
+            np.array([y for _, y, _ in data["cost"]]),
+            offset=np.array([o for _, _, o in data["cost"]]),
+            budget=1.0,
+        )
+    if len(data["brief"]) >= 3:
+        heads.brief = fit(TWEEDIE, [r for r, _ in data["brief"]], np.array([y for _, y in data["brief"]]), budget=1.0)
+    if len(data["post"]) >= 3:
+        heads.post = fit(
+            TWEEDIE,
+            [r for r, _, _ in data["post"]],
+            np.array([y for _, y, _ in data["post"]]),
+            extra=np.array([[f] for _, _, f in data["post"]]),
+            extra_names=("failed",),
+            budget=1.0,
+            nonnegative=("failed",),
+        )
+    if len(data["minutes"]) >= 3:
+        heads.minutes = fit(
+            TWEEDIE, [r for r, _ in data["minutes"]], np.array([y for _, y in data["minutes"]]), budget=1.0
+        )
+    if path:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(pickle.dumps(heads))
+        except OSError:
+            pass
+    return heads
+
+
+# ---- predictions --------------------------------------------------------------------------------
+
+
+@dataclass
+class Forecast:
+    """Joint draws for each candidate (draws x candidates): the quantities the unit cost is made of."""
+
+    actors: list[str]
+    q: np.ndarray
+    value: np.ndarray
+    cost: np.ndarray
+    brief: np.ndarray
+    post: np.ndarray
+    increment: np.ndarray
+    integrity: np.ndarray
+    cost_sd: np.ndarray  # spread of one run's log cost, for the capacity gate's upper quantile
+
+    def unit(self, scarcity: dict[str, float], lead_scarcity: float) -> np.ndarray:
+        """Expected cost per standing result per unit of value, for every draw and candidate."""
+        out = np.empty_like(self.q)
+        for j, actor in enumerate(self.actors):
+            q = np.clip(self.q[:, j], 1e-3, 1.0)
+            v = np.maximum(self.value[:, j], 1e-3)
+            if actor == LEAD:
+                spend = lead_scarcity * (self.cost[:, j] + (1 - q) * self.increment[:, j])
+            else:
+                spend = (
+                    scarcity.get(actor, 1.0) * self.cost[:, j]
+                    + lead_scarcity * (self.brief[:, j] + self.post[:, j] + (1 - q) * self.increment[:, j])
+                    + self.integrity[:, j] * FAILURE_DAMAGE * self.increment[:, j]
+                )
+            out[:, j] = spend / (q * v)
+        return out
+
+
+def _sig(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
+
+
+def forecast(
+    world: World,
+    heads: Heads,
+    kind: Kind,
+    cls: str,
+    actors: list[str],
+    at: datetime,
+    retry: bool,
+    rng: np.random.Generator,
+    m: int = DRAWS + 1,
+) -> Forecast:
+    project = world.config.project
+    succ = [row(world, project, kind, cls, a, at, "success") for a in actors]
+    cost_rows = [row(world, project, kind, cls, a, at, "cost") for a in actors]
+    for r in succ + cost_rows:
+        r.retry = 1.0 if retry else 0.0
+    c = len(actors)
+
+    def logit_draws(head, rows, default):
+        if head is None:
+            return _sig(rng.normal(default, 0.7, (m, c)))
+        return _sig(head.draws(rows, rng, m)[0])
+
+    q = logit_draws(heads.q, succ, 2.2)
+    if kind.measure == "lead-score":
+        value = logit_draws(heads.score, succ, 1.0)
+    elif kind.measure == "yield":
+        value = np.exp(heads.yield_.draws(succ, rng, m)[0]) if heads.yield_ else np.ones((m, c))
+    else:
+        value = np.ones((m, c))
+    integrity = logit_draws(heads.integrity, succ, -4.0)
+    offsets = np.array([math.log(_price(world.config, a)) for a in actors])
+    if heads.cost is not None:
+        eta, _ = heads.cost.draws(cost_rows, rng, m, offset=offsets)
+        cost = np.exp(eta)
+        mu = np.exp(heads.cost.mean(cost_rows, offset=offsets))
+        cost_sd = np.sqrt(np.log1p(heads.cost.phi * np.maximum(mu, 1e-6) ** (-0.5)) + eta.var(axis=0))
+    else:
+        cost = np.exp(offsets[None, :] + rng.normal(0, 0.5, (m, c)))
+        cost_sd = np.full(c, 0.7)
+    brief = np.exp(heads.brief.draws(cost_rows, rng, m)[0]) if heads.brief else np.zeros((m, c))
+    if heads.post is not None:
+        zeros = np.zeros((c, 1))
+        eta, b = heads.post.draws(cost_rows, rng, m, extra=zeros)
+        post = np.exp(eta)
+        failed_coef = b[:, heads.post.fixed.index("failed")]
+        increment = post * (np.exp(failed_coef)[:, None] - 1.0)
+    else:
+        post = np.zeros((m, c))
+        increment = np.zeros((m, c))
+    return Forecast(actors, q, value, cost, brief, post, increment, integrity, cost_sd)
+
+
+# ---- capacity -----------------------------------------------------------------------------------
+
+
+def holding(world: World) -> list[tuple[str, Task]]:
+    """Every open task on the host, with its project."""
+    return [(p, t) for p, _, t in world.tasks() if t.holding]
+
+
+def reserve(world: World, specs: list[str]) -> tuple[dict | None, str | None]:
+    """The reservation for SPECS against tasks still holding theirs: the project's own resources against its own
+    tasks, shared host resources against every project's."""
+    config = world.config
     held: dict[str, list] = {}
-    for task in state.tasks.values():
-        if task.holding:
-            for name, value in (task.open.get("resources") or {}).items():
+    for project, task in holding(world):
+        for name, value in (task.open.get("resources") or {}).items():
+            resource = config.resource(name)
+            if resource is None:
+                continue
+            if resource.shared or project == config.project:
                 held.setdefault(name, []).append(value)
     reservation = {}
     for spec in specs:
         name, amount = parse_resource_spec(spec)
-        resource = config.resources.get(name)
+        resource = config.resource(name)
         if resource is None:
             raise ConfigError(f"unknown resource {name!r}")
         taken = held.get(name, [])
@@ -249,7 +386,6 @@ def reserve(config: Config, state: State, specs: list[str]) -> tuple[dict | None
                 return None, name
             reservation[name] = free[0]
             continue
-        # A counted resource takes whole slots, such as all of a live client a relaunch would end every job on.
         need = amount if amount is not None else 1.0
         if not resource.amounts:
             if need != int(need):
@@ -263,277 +399,378 @@ def reserve(config: Config, state: State, specs: list[str]) -> tuple[dict | None
     return reservation, None
 
 
-# ---- the choice ----------------------------------------------------------------------------------
+def suspended(world: World, actor: str, kind: str) -> bool:
+    """Whether a person suspended ACTOR, everywhere or in KIND of this project, and has not resumed it."""
+    last_stop, last_go = None, None
+    for project, event in world.events:
+        if event.get("actor") != actor:
+            continue
+        name = event.get("event")
+        scoped = event.get("kind")
+        applies = scoped is None or (scoped == kind and project == world.config.project)
+        if not applies:
+            continue
+        at = parse_time(event["at"])
+        if name in ("suspend", "drop"):
+            last_stop = at if last_stop is None or at > last_stop else last_stop
+        elif name == "resume":
+            last_go = at if last_go is None or at > last_go else last_go
+    return last_stop is not None and (last_go is None or last_go < last_stop)
 
 
-def busy_until_verdict(stats: Stats, actor: str) -> bool:
-    """No further task in the kind before a first verdict there."""
-    mine = stats.of(actor)
-    if any(t.final for t in mine):
-        return False
-    return any(t.outcome != "aborted" for t in mine)
+# ---- the choice -----------------------------------------------------------------------------------
 
 
 def select(
-    config: Config,
-    state: State,
+    world: World,
+    env: Env,
     kind_name: str,
     cls: str,
     now: datetime,
-    env: Env,
     resources: list[str] | None = None,
     token_cap: float | None = None,
     retry: str | None = None,
     since: datetime | None = None,
     assign: str | None = None,
     why: str | None = None,
+    cause: str | None = None,
 ) -> tuple[dict, list[dict]]:
-    """The answer, and the events to append: drops the rule made, then the open (none for wait)."""
+    """The answer, and the open event to append (none for a wait)."""
+    config = world.config
+    state = world.projects[config.project][1]
     kind = config.kinds.get(kind_name)
     if kind is None:
         raise SelectError(f"unknown kind {kind_name!r}")
     if cls not in kind.classes:
         raise SelectError(f"unknown class {cls!r} for kind {kind_name}; classes are {', '.join(kind.classes)}")
-    stats = Stats(config, state, kind, env)
-    specs = resources if resources is not None else kind.resources
-    reservation, busy = reserve(config, state, specs)
-    excluded = state.tasks[retry].actor if retry and retry in state.tasks else None
     if retry and retry not in state.tasks:
         raise SelectError(f"unknown task {retry!r} to retry")
-    events: list[dict] = []
-
-    def answer(kind_of_answer, actor=None, reason=None, **extra):
-        result = {"answer": kind_of_answer, "kind": kind_name, "class": cls}
-        if kind_of_answer == "wait":
-            waiting = {**result, "waiting_for": extra["waiting_for"], "since": (since or now).isoformat()}
-            # A pool check that could not answer is a failure to fix, not quota to wait for.
-            if failures := [r for room in refused.values() if room["state"] == "error" for r in room["reasons"]]:
-                waiting = {**waiting, "answer": "error", "error": "; ".join(dict.fromkeys(failures))}
-            return ({**waiting, "refused": refused} if refused else waiting), events
-        task_id = f"{kind_name}-{sum(t.kind == kind_name for t in state.tasks.values()) + 1:04d}"
-        actor_part, lead_part, _ = stats.cost_parts(actor, cls)
-        expected = {"actor_cost": actor_part, "lead_cost": None if actor == LEAD else lead_part}
-        event = {
-            "event": "open",
-            "at": now.isoformat(),
-            "task": task_id,
-            "kind": kind_name,
-            "class": cls,
-            "actor": actor,
-            "reason": reason,
-            "resources": reservation or {},
-            "token_cap": token_cap,
-            "expected": expected,
-        }
-        for key in ("seed", "retry_of", "why", "marginal"):
-            if extra.get(key) is not None:
-                event[key] = extra[key]
-        # The account of a pool with several, such as Claude's, that the pool check chose for the run to land on.
-        executor = config.executors.get(actor)
-        if executor and executor.pool:
-            account = (checked.get(actor) or pool_room(executor)).get("account")
-            if account:
-                event["account"] = account
-        events.append(event)
-        return {
-            **result,
-            "task": task_id,
-            "actor": actor,
-            "reason": reason,
-            "resources": reservation or {},
-            **({"account": event["account"]} if "account" in event else {}),
-            **({"executor": vars(config.executors[actor])} if actor in config.executors else {}),
-        }, events
-
-    running: dict[str, list[Task]] = {}
-    for task in state.tasks.values():
-        if task.holding and (pool := getattr(config.executors.get(task.actor), "pool", None)):
-            running.setdefault(pool, []).append(task)
-
-    def pool_dollars(name: str, cost: float | None, lead_cost: float | None) -> float | None:
-        """What a run spends on its actor's pool: its actor cost, and its lead cost when the lead shares the pool."""
-        if cost is None:
-            return None
-        return cost + (lead_cost or 0) if config.executors[name].pool == config.lead_pool else cost
-
-    def check_pool(pool: str, dollars: float | None) -> dict:
-        """The pool check for one more run spending DOLLARS on POOL, with the project's runs already going there,
-        which the pool's reading cannot show yet, and for a pool with no measured price its need in points for each
-        of those runs."""
-        going = running.get(pool, [])
-        if (most := config.pool_runs.get(pool)) is not None and len(going) >= most:
-            return {
-                "room": False,
-                "marginal": 1.0,
-                "state": "refused",
-                "reasons": [f"{pool} takes {most} open tasks at once and has {len(going)}"],
-                "dollars": dollars,
-                "need": None,
-            }
-        for task in going:
-            expected = task.open.get("expected") or {}
-            spent = pool_dollars(task.actor, expected.get("actor_cost"), expected.get("lead_cost"))
-            dollars = spent if dollars is None else dollars + (spent or 0)
-        need, runs = config.pool_need.get(pool), 1 + len(going)
-        if isinstance(need, dict):
-            need = {length: points * runs for length, points in need.items()}
-        elif need is not None:
-            need *= runs
-        return {**env.pool(pool, dollars, need), "dollars": dollars, "need": need}
-
-    # Executors otherwise eligible, and the lead past the wait deadline, whose pool check refused them, with what
-    # was asked and why, for a wait answer.
-    refused: dict[str, dict] = {}
-
-    def refuse(name: str, room: dict):
-        refused[name] = {
-            "pool": config.lead_pool if name == LEAD else config.executors[name].pool,
-            "dollars": None if room.get("dollars") is None else round(room["dollars"], 2),
-            **({"need": room["need"]} if room.get("need") is not None else {}),
-            "state": room.get("state"),
-            "reasons": room.get("reasons") or [],
-        }
-
-    checked: dict[str, dict] = {}  # each executor's pool check in this select
-
-    def pool_room(executor) -> dict:
-        if not executor.pool:
-            return {"room": True, "marginal": 1.0}
-        actor_part, lead_part, _ = stats.cost_parts(executor.name, cls)
-        checked[executor.name] = check_pool(executor.pool, pool_dollars(executor.name, actor_part, lead_part))
-        return checked[executor.name]
-
+    excluded = state.tasks[retry].actor if retry else None
+    specs = resources if resources is not None else kind.resources
+    reservation, busy = reserve(world, specs)
+    answer = {"kind": kind_name, "class": cls}
+    if busy:
+        return {**answer, "answer": "wait", "waiting_for": busy, "since": (since or now).isoformat()}, []
+    heads = fit_heads(world, env.cache)
+    seed = env.rng.randrange(2**32)
+    rng = np.random.default_rng(seed)
+    host = config.host
     if assign:
-        executor = config.executors.get(assign)
-        if executor is None:
-            raise SelectError(f"unknown executor {assign!r}")
+        if assign != LEAD and assign not in host.actors:
+            raise SelectError(f"unknown actor {assign!r}")
         if not why:
             raise SelectError("an assignment needs --why, the user's or lead's reason")
-        if (position := standing(stats, assign)) != "active":
-            raise SelectError(f"{assign} is {position} in {kind_name}; resume it before assigning it work")
-        if not set(kind.capabilities) <= set(executor.capabilities):
+        if cause is not None and cause not in CAUSES:
+            raise SelectError(f"--cause is one of {', '.join(CAUSES)}")
+        if suspended(world, assign, kind_name):
+            raise SelectError(f"{assign} is suspended; resume it before assigning it work")
+        if assign != LEAD and not set(kind.capabilities) <= set(host.actors[assign].capabilities):
             raise SelectError(
-                f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(executor.capabilities))}"
+                f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(host.actors[assign].capabilities))}"
             )
-        if busy:
-            return answer("wait", waiting_for=busy)
-        return answer("delegate", assign, "assigned", why=why)
-
-    def lead(reason="lead"):
-        if busy:
-            return answer("wait", waiting_for=busy)
-        return answer("lead", LEAD, reason)
-
-    if kind.state_of(cls) != "on":
-        return lead()
-    eligible, pool_blocked = [], []
-    for name, executor in config.executors.items():
-        if standing(stats, name) != "active" or busy_until_verdict(stats, name):
-            continue
-        if name == excluded or not set(kind.capabilities) <= set(executor.capabilities):
-            continue
-        if reason := should_drop(stats, name, cls):
-            events.append(
-                {
-                    "event": "drop",
-                    "at": now.isoformat(),
-                    "actor": name,
-                    "kind": kind_name,
-                    "reason": f"drop rule: {reason}",
-                }
-            )
-            continue
-        eligible.append(name)
-    rooms = {}
-    for name in list(eligible):
-        rooms[name] = pool_room(config.executors[name])
-        if not rooms[name]["room"]:
-            refuse(name, rooms[name])
-            eligible.remove(name)
-            pool_blocked.append(config.executors[name].pool)
+        fc = forecast(world, heads, kind, cls, [assign], now, bool(retry), rng)
+        return _open(
+            world,
+            kind,
+            cls,
+            assign,
+            "assigned",
+            fc,
+            None,
+            reservation,
+            token_cap,
+            retry,
+            now,
+            seed,
+            heads,
+            why=why,
+            cause=cause or "user",
+        )
+    candidates = [
+        name
+        for name, actor in host.actors.items()
+        if name != excluded
+        and set(kind.capabilities) <= set(actor.capabilities)
+        and not suspended(world, name, kind_name)
+    ]
+    lead_ok = excluded != LEAD and not suspended(world, LEAD, kind_name)
+    actors = candidates + ([LEAD] if lead_ok else [])
+    if not actors:
+        return {
+            **answer,
+            "answer": "wait",
+            "waiting_for": "no actor may take this task",
+            "since": (since or now).isoformat(),
+        }, []
+    fc = forecast(world, heads, kind, cls, actors, now, bool(retry), rng)
+    open_tasks = holding(world)
+    refused: dict[str, dict] = {}
+    rooms: dict[str, dict] = {}
+    for j, name in enumerate(actors):
+        room = _room(world, env, name, fc, j, open_tasks)
+        rooms[name] = room
+        if not room["room"]:
+            refused[name] = room
+    eligible = [a for a in actors if a not in refused]
     if not eligible:
-        if busy or pool_blocked:
-            deadline = timedelta(minutes=config.wait_deadline_minutes)
-            if since and now - since >= deadline and not busy:
-                lead_room = (
-                    check_pool(config.lead_pool, stats.expected_cost(LEAD, cls)) if config.lead_pool else {"room": True}
-                )
-                if lead_room["room"]:
-                    return lead()
-                refuse(LEAD, lead_room)
-            return answer("wait", waiting_for=busy or sorted(set(pool_blocked))[0])
-        return lead()
-    if busy:
-        return answer("wait", waiting_for=busy)
-
-    # Quota due to expire unused costs nothing, so a run on a pool behind its pace is priced at its marginal share
-    # of the actor's cost, the success rate still counting; not on the lead's pool, whose quota the lead needs, and
-    # not in a deferred kind, whose choice is the cheapest by its real cost.
-    marginal = {
-        n: 1.0
-        if kind.check == "deferred" or config.executors[n].pool == config.lead_pool
-        else rooms[n].get("marginal", 1.0)
-        for n in eligible
+        errors = [r for room in refused.values() if room.get("state") == "error" for r in room.get("reasons", [])]
+        waiting = {
+            **answer,
+            "answer": "wait",
+            "waiting_for": "pool room",
+            "since": (since or now).isoformat(),
+            "refused": refused,
+        }
+        if errors and len(errors) == sum(len(r.get("reasons", [])) for r in refused.values()):
+            waiting = {**waiting, "answer": "error", "error": "; ".join(dict.fromkeys(errors))}
+        return waiting, []
+    scarcity = {a: max(SCARCITY_FLOOR, rooms[a].get("marginal", 1.0)) for a in actors if a != LEAD}
+    lead_scarcity = max(SCARCITY_FLOOR, rooms.get(LEAD, {}).get("marginal", 1.0))
+    units = fc.unit(scarcity, lead_scarcity)
+    idx = [actors.index(a) for a in eligible]
+    sub = units[:, idx]
+    chosen = eligible[int(np.argmin(sub[0]))]
+    winners = np.argmin(sub, axis=1)
+    probs = {a: float(np.mean(winners == i)) for i, a in enumerate(eligible)}
+    predictions = {
+        a: {"unit": round(float(sub[:, i].mean()), 4), "sd": round(float(sub[:, i].std()), 4), "p": round(probs[a], 4)}
+        for i, a in enumerate(eligible)
     }
-    discounts = {n: round(m, 3) for n, m in marginal.items() if m < 1}
-    # Every executor gets one task in a kind before the record decides, and no second until that one is judged.
-    untried = [n for n in eligible if not stats.of(n)]
-    if untried:
-        ranked = sorted(
-            untried,
-            key=lambda n: (stats.expected_cost(n, cls) is None, stats.marginal_cost(n, cls, marginal[n]) or 0, n),
-        )
-        return answer("delegate", ranked[0], "warm-up", marginal=discounts or None)
-    if kind.check == "deferred":
-        ranked = sorted(
-            eligible, key=lambda n: (stats.cost_per_success(n, cls) is None, stats.cost_per_success(n, cls) or 0, n)
-        )
-        return answer("delegate", ranked[0], "cheapest")
-    seed = env.rng.randrange(2**32)
-    rng = random.Random(seed)
-    draws = {n: stats.cost_per_success_draws(n, cls, rng, 1, marginal[n])[0] for n in sorted(eligible)}
-    best = min(draws, key=lambda n: (draws[n], n))
-    return answer("delegate", best, "draw", seed=seed, retry_of=retry, marginal=discounts or None)
+    account = rooms.get(chosen, {}).get("account")
+    return _open(
+        world,
+        kind,
+        cls,
+        chosen,
+        "draw",
+        fc,
+        predictions,
+        reservation,
+        token_cap,
+        retry,
+        now,
+        seed,
+        heads,
+        account=account,
+        refused=refused or None,
+        scarcity={a: round(s, 3) for a, s in scarcity.items() if s < 1} or None,
+    )
 
 
-def scorecard(config: Config, state: State, env: Env, only: str | None = None) -> list[dict]:
+def _room(world: World, env: Env, name: str, fc: Forecast, j: int, open_tasks) -> dict:
+    """Whether ACTOR's pool has room for one more run: its cap across the host, then the pool check at the run's
+    upper quantile of cost with what is already open there. A pool the check cannot price takes one run at a time."""
+    host = world.config.host
+    actor = host.lead if name == LEAD else host.actors.get(name)
+    pool = actor.pool if actor else None
+    mean_cost = float(fc.cost[:, j].mean())
+    upper = mean_cost * math.exp(1.28 * float(fc.cost_sd[j]))
+    if name == LEAD:
+        lead_open = sum(1 for _, t in open_tasks if t.actor == LEAD)
+        most = actor.runs if actor and actor.runs else 1
+        if lead_open >= most:
+            return {
+                "room": False,
+                "state": "refused",
+                "reasons": [f"the lead takes {most} tasks at once and has {lead_open}"],
+            }
+    on_pool = [
+        t for _, t in open_tasks if pool and (lambda a: a is not None and a.pool == pool)(_actor(world.config, t.actor))
+    ]
+    if pool and (most := host.pool_runs.get(pool)) is not None and len(on_pool) >= most:
+        return {
+            "room": False,
+            "state": "refused",
+            "reasons": [f"{pool} takes {most} open tasks at once and has {len(on_pool)}"],
+        }
+    if not pool:
+        return {"room": True, "marginal": 1.0, "state": "unchecked"}
+    in_flight = sum(float((t.open.get("expected") or {}).get("cost") or 0) for t in on_pool)
+    if host.lead and pool == host.lead.pool and name != LEAD:
+        upper += float(fc.brief[:, j].mean() + fc.post[:, j].mean())
+    room = env.pool(pool, upper + in_flight)
+    if room.get("state") == "unavailable" and not on_pool:
+        return {**room, "room": True, "marginal": 1.0, "unmeasured": True}
+    return room
+
+
+def _open(world, kind, cls, actor, reason, fc, predictions, reservation, token_cap, retry, now, seed, heads, **extra):
+    state = world.projects[world.config.project][1]
+    task_id = f"{kind.name}-{sum(t.kind == kind.name for t in state.tasks.values()) + 1:04d}"
+    j = fc.actors.index(actor)
+    expected = {
+        "q": round(float(fc.q[:, j].mean()), 4),
+        "value": round(float(fc.value[:, j].mean()), 4),
+        "cost": round(float(fc.cost[:, j].mean()), 4),
+        "integrity": round(float(fc.integrity[:, j].mean()), 4),
+    }
+    if actor != LEAD:
+        expected.update(
+            brief=round(float(fc.brief[:, j].mean()), 4),
+            post=round(float(fc.post[:, j].mean()), 4),
+            increment=round(float(fc.increment[:, j].mean()), 4),
+        )
+    event = {
+        "event": "open",
+        "at": now.isoformat(),
+        "task": task_id,
+        "kind": kind.name,
+        "class": cls,
+        "actor": actor,
+        "reason": reason,
+        "resources": reservation or {},
+        "token_cap": token_cap,
+        "seed": seed,
+        "expected": expected,
+        "policy": __version__,
+        "fit": heads.id,
+    }
+    if predictions is not None:
+        event["predictions"] = predictions
+    if retry:
+        event["retry_of"] = retry
+    for key in ("why", "cause", "account", "refused", "scarcity"):
+        if extra.get(key) is not None:
+            event[key] = extra[key]
+    answer = {
+        "answer": "lead" if actor == LEAD else "delegate",
+        "kind": kind.name,
+        "class": cls,
+        "task": task_id,
+        "actor": actor,
+        "reason": reason,
+        "resources": reservation or {},
+        "expected": expected,
+    }
+    if extra.get("account"):
+        answer["account"] = extra["account"]
+    executor = world.config.host.actors.get(actor)
+    if executor:
+        answer["executor"] = {k: v for k, v in vars(executor).items() if k != "name"}
+    return answer, [event]
+
+
+# ---- epochs ---------------------------------------------------------------------------------------
+
+
+def _judged_at(task: Task) -> datetime | None:
+    if task.verdict:
+        return parse_time(task.verdict["at"])
+    return task.closed_at
+
+
+def detect_epochs(world: World, actor: str, now: datetime) -> list[dict]:
+    """New epoch events for ACTOR, if its results or its costs since its last epoch show a change."""
+    if actor == LEAD:
+        return []
+    out = []
+    mine = [(p, c, t) for p, c, t in world.tasks() if t.actor == actor]
+    last = {
+        s: max(
+            (
+                parse_time(e["at"])
+                for _, e in world.events
+                if e.get("event") == "epoch" and e.get("actor") == actor and e.get("signal") == s
+            ),
+            default=None,
+        )
+        for s in ("success", "cost")
+    }
+    # Success: each result against its predicted chance, shifted by how its kind is going for everyone lately.
+    judged = sorted(
+        ((t, p) for p, _, t in mine if t.stood is not None and (t.open.get("expected") or {}).get("q") is not None),
+        key=lambda x: _judged_at(x[0]),
+    )
+    if len(judged) >= epochs.WATCH_AFTER:
+        obs = []
+        for task, project in judged:
+            when = _judged_at(task)
+            if last["success"] and when <= last["success"]:
+                continue
+            q = min(max(float(task.open["expected"]["q"]), 1e-3), 1 - 1e-3)
+            obs.append((math.log(q / (1 - q)) + _trend(world, project, task, actor), 1.0 if task.stood else 0.0))
+        if epochs.changed("success", obs):
+            out.append(
+                {"event": "epoch", "at": now.isoformat(), "actor": actor, "signal": "success", "observations": len(obs)}
+            )
+    costed = sorted(
+        (t for _, _, t in mine if t.cost("actor") and (t.open.get("expected") or {}).get("cost")),
+        key=lambda t: t.closed_at,
+    )
+    if len(costed) >= epochs.WATCH_AFTER:
+        obs = [
+            (math.log(float(t.open["expected"]["cost"])), math.log(t.cost("actor")))
+            for t in costed
+            if not (last["cost"] and t.closed_at <= last["cost"])
+        ]
+        if epochs.changed("cost", obs):
+            out.append(
+                {"event": "epoch", "at": now.isoformat(), "actor": actor, "signal": "cost", "observations": len(obs)}
+            )
+    return out
+
+
+def _trend(world: World, project: str, task: Task, actor: str) -> float:
+    """How the task's kind went for other actors in the ten results judged before it, against their predictions."""
+    when = _judged_at(task)
+    _, state = world.projects[project]
+    others = [
+        t
+        for t in state.tasks.values()
+        if t.kind == task.kind
+        and t.actor != actor
+        and t.stood is not None
+        and _judged_at(t) < when
+        and (t.open.get("expected") or {}).get("q")
+    ]
+    others = sorted(others, key=_judged_at)[-10:]
+    if len(others) < 5:
+        return 0.0
+    rate = min(max(sum(t.stood for t in others) / len(others), 0.02), 0.98)
+    predicted = min(max(sum(float(t.open["expected"]["q"]) for t in others) / len(others), 0.02), 0.98)
+    return math.log(rate / (1 - rate)) - math.log(predicted / (1 - predicted))
+
+
+# ---- the scorecard ------------------------------------------------------------------------------
+
+
+def scorecard(world: World, env: Env, now: datetime, only: str | None = None) -> list[dict]:
+    """Each actor's record and current forecast per kind of this project."""
+    config = world.config
+    state = world.projects[config.project][1]
+    heads = fit_heads(world, env.cache)
+    rng = np.random.default_rng(0)
     rows = []
-    for name, kind in config.kinds.items():
-        if only and name != only:
+    for kind in config.kinds.values():
+        if only and kind.name != only:
             continue
-        stats = Stats(config, state, kind, env)
-        actors = sorted({t.actor for t in stats.tasks} | set(config.executors))
-        for actor in actors:
-            mine = stats.of(actor)
-            final = stats.final(actor)
-            scores = [t.score for t in final if t.score is not None]
-            # What the actor's closed tasks cost in all, aborted ones and redo included, against the results that
-            # stand: the economics of the choice, before any sampling or shrinking.
-            closed = [t for t in mine if t.close]
-            spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) + t.redo_cost for t in closed)
-            accepted = sum(t.outcome in ("held", "steered") for t in closed)
+        names = list(
+            dict.fromkeys([*config.host.actors, LEAD, *(t.actor for t in state.tasks.values() if t.kind == kind.name)])
+        )
+        fc = forecast(world, heads, kind, kind.classes[0], names, now, False, rng, m=200)
+        units = fc.unit({}, 1.0)
+        for j, name in enumerate(names):
+            tasks = [t for t in state.tasks.values() if t.kind == kind.name and t.actor == name]
+            final = [t for t in tasks if t.stood is not None]
+            spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) for t in tasks if t.close)
+            stood = sum(1 for t in final if t.stood)
             rows.append(
                 {
-                    "kind": name,
-                    "actor": actor,
-                    "standing": "lead" if actor == LEAD else standing(stats, actor),
-                    "tasks": len(mine),
+                    "kind": kind.name,
+                    "actor": name,
+                    "suspended": suspended(world, name, kind.name),
+                    "tasks": len(tasks),
+                    "pending": sum(1 for t in tasks if t.stood is None and t.outcome != "aborted"),
                     "verdicts": len(final),
-                    "successes": round(sum(success(t, kind) for t in final), 2),
-                    "cost_per_success": stats.cost_per_success(actor, kind.classes[0]) if final else None,
-                    "integrity": sum(t.defect == "integrity" for t in final),
+                    "stood": stood,
+                    "integrity": sum(1 for t in final if t.integrity),
                     "rescored": sum("score.value" in t.amended for t in final),
-                    "scores": {"min": min(scores), "median": median(scores), "max": max(scores)} if scores else None,
-                    "yield": sum(t.yield_ or 0 for t in final) if kind.measure == "yield" else None,
-                    "held_minutes": round(
-                        sum(sum(((t.close or {}).get("minutes") or {}).get("held", {}).values()) for t in mine), 1
-                    ),
-                    "open": sum(not t.final and t.outcome != "aborted" for t in mine),
+                    "epochs": sum(1 for _, e in world.events if e.get("event") == "epoch" and e.get("actor") == name),
                     "spend": round(spend, 2),
-                    "accepted": accepted,
-                    "aborted": sum(t.outcome == "aborted" for t in closed),
-                    "unpriced": sum(t.cost("actor") is None for t in closed if t.outcome != "aborted"),
-                    "spend_per_accepted": round(spend / accepted, 2) if accepted else None,
+                    "spend_per_stood": round(spend / stood, 2) if stood else None,
+                    "q": round(float(fc.q[:, j].mean()), 3),
+                    "cost": round(float(fc.cost[:, j].mean()), 2),
+                    "unit": round(float(np.median(units[:, j])), 2),
                 }
             )
     return rows

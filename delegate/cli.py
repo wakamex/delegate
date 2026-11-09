@@ -13,17 +13,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate import policy
-from delegate.config import ConfigError, find_config, load
+from delegate.config import LEAD, ConfigError, find_config, load
 from delegate.ledger import Ledger, LedgerError, parse_time
-from delegate.policy import LEAD, Env, SelectError
+from delegate.policy import Env, SelectError
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "delegate"
 AOP_RESULTS = STATE / "aop" / "results"
 AGENT_JOBS = STATE / "agent-jobs"  # each agent-job unit's log, where aop prints its run ids
-# The pool check: a command taking --check TARGET [--cost DOLLARS] [--need N | --need 7d=N,30d=M] that prints
-# one JSON line and exits 0 for room, 1 or 3 for none and 2 for an error, such as usage-burn. Without one,
-# pools are not checked.
+# The pool check: a command taking --check TARGET [--cost DOLLARS] that prints one JSON line and exits 0 for room,
+# 1 or 3 for none and 2 for an error, such as usage-burn. Without one, pools are not checked.
 USAGE_BURN = os.environ.get("DELEGATE_USAGE_BURN") or shutil.which("usage-burn")
 SESSION_COST_SECONDS = 60
 
@@ -41,10 +40,10 @@ def now() -> datetime:
 # ---- what select and close need from outside the ledger ------------------------------------------
 
 
-def pool_check(target: str, dollars: float | None, need: float | dict[str, float] | None) -> dict:
-    """Room on a quota pool for runs spending DOLLARS, with NEED points for windows the check has no price for,
-    one number for every window or one per window length: exit 0 room, 1 or 3 none, 2 an error. A check that
-    cannot answer gives no room with state "error", so the other pools can still be chosen from."""
+def pool_check(target: str, dollars: float | None) -> dict:
+    """Room on a quota pool for runs spending DOLLARS: exit 0 room, 1 or 3 none, 2 an error. A check that cannot
+    answer gives no room with state "error", so the other pools can still be chosen from; one that cannot price the
+    run answers "unavailable", which delegate treats as a pool to run one task on at a time."""
 
     def failed(reason: str) -> dict:
         return {
@@ -59,12 +58,6 @@ def pool_check(target: str, dollars: float | None, need: float | dict[str, float
     command = [USAGE_BURN, "--check", target]
     if dollars is not None:
         command += ["--cost", f"{dollars:.4f}"]
-    if need is not None:
-        parts = need.items() if isinstance(need, dict) else [(None, need)]
-        command += [
-            "--need",
-            ",".join(f"{length}={points:.4f}" if length else f"{points:.4f}" for length, points in parts),
-        ]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -271,9 +264,10 @@ def lead_session(config, given: str | None = None) -> str | None:
     return given or os.environ.get("DELEGATE_LEAD_SESSION") or config.lead_session
 
 
-def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) -> float | None:
+def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) -> tuple[float, float] | None:
     """The lead's turns charged to TASK, from the lead session's turns and priced responses as clanker-analytics
-    reads them. Unknown when there is no session or clanker-analytics cannot say."""
+    reads them, in total and before the task started (its brief). Unknown when there is no session or
+    clanker-analytics cannot say."""
     session = lead_session(config, session)
     if not session:
         return None
@@ -287,8 +281,18 @@ def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) 
         (moment, cost) for moment, cost in activity["costs"] if moment >= since and (until is None or moment <= until)
     ]
     started = task.started or {}
-    names = [name for name in [*(started.get("units") or []), started.get("aop_run"), *runs] if name]
-    return charged_lead_cost(activity["turns"], costs, names, task.opened, other_opens)
+    # Turns before the start can name only the task: its unit and run do not exist yet.
+    names = [name for name in [task.id, *(started.get("units") or []), started.get("aop_run"), *runs] if name]
+    total = charged_lead_cost(activity["turns"], costs, names, task.opened, other_opens)
+    began = parse_time(started["at"]) if started.get("at") else None
+    brief = (
+        total
+        if began is None
+        else charged_lead_cost(
+            activity["turns"], [(m, c) for m, c in costs if m < began], names, task.opened, other_opens
+        )
+    )
+    return total, brief
 
 
 ENV = {
@@ -334,29 +338,38 @@ def _task(session, task_id):
 
 
 def _env(config) -> Env:
-    return Env(pool=ENV["pool"], rng=random.Random())
+    return Env(pool=ENV["pool"], rng=random.Random(), cache=CACHE)
+
+
+def _world(config, session) -> policy.World:
+    return policy.load_world(config, session.state, lambda path: Ledger(path).read())
 
 
 def cmd_select(config, session, args, moment):
     resources = args.resources.split(",") if args.resources else None
     since = parse_time(args.since) if args.since else None
     result, events = policy.select(
-        config,
-        session.state,
+        _world(config, session),
+        _env(config),
         args.kind,
         args.cls,
         moment,
-        _env(config),
         resources,
         args.token_cap,
         args.retry,
         since,
         args.assign,
         args.why,
+        args.cause,
     )
     for event in events:
         session.append(event)
     return result
+
+
+def _epochs(config, session, actor, moment) -> list[dict]:
+    """Append an epoch for ACTOR if its record since its last epoch shows a change."""
+    return [session.append(e) for e in policy.detect_epochs(_world(config, session), actor, moment)]
 
 
 def cmd_started(config, session, args, moment):
@@ -530,17 +543,22 @@ def cmd_close(config, session, args, moment):
             actor_cost = runs_cost(results)
             if run_minutes is None:
                 run_minutes = runs_minutes(results)
-    lead_cost = (
-        args.lead_cost
-        if args.lead_cost is not None
-        else ENV["lead_cost"](
-            config, task, runs, args.lead_session, [t.opened for t in session.state.tasks.values() if t.id != task.id]
-        )
+    measured = ENV["lead_cost"](
+        config, task, runs, args.lead_session, [t.opened for t in session.state.tasks.values() if t.id != task.id]
     )
+    lead_cost, brief = measured if measured else (None, None)
+    if args.lead_cost is not None:
+        lead_cost, brief = args.lead_cost, None
+    if task.actor == LEAD and actor_cost is None:
+        actor_cost = lead_cost  # the lead's own work is its actor cost
     held = {name: round((moment - task.opened).total_seconds() / 60, 1) for name in (task.open.get("resources") or {})}
     event.update(
         {
-            "cost": {"actor": actor_cost, "lead": None if task.actor == LEAD else lead_cost},
+            "cost": {
+                "actor": actor_cost,
+                "lead": None if task.actor == LEAD else lead_cost,
+                "brief": None if task.actor == LEAD else brief,
+            },
             "resumes": args.resumes
             if args.resumes is not None
             else sum(
@@ -557,7 +575,9 @@ def cmd_close(config, session, args, moment):
     )
     if kind.investigation:
         event["falsifier_checked"] = args.falsifier_checked == "true"
-    return session.append(event)
+    written = session.append(event)
+    epochs = _epochs(config, session, task.actor, moment)
+    return {**written, "epochs": epochs} if epochs else written
 
 
 def cmd_verdict(config, session, args, moment):
@@ -584,7 +604,9 @@ def cmd_verdict(config, session, args, moment):
         event["score"] = score
     if yielded is not None:
         event["yield"] = yielded
-    return session.append(event)
+    written = session.append(event)
+    epochs = _epochs(config, session, task.actor, moment)
+    return {**written, "epochs": epochs} if epochs else written
 
 
 def cmd_overturn(config, session, args, moment):
@@ -593,7 +615,7 @@ def cmd_overturn(config, session, args, moment):
         raise UsageError(f"{root.id} is not a standing success to overturn")
     if args.found_by:
         _task(session, args.found_by)
-    return session.append(
+    written = session.append(
         {
             "event": "overturn",
             "at": moment.isoformat(),
@@ -601,8 +623,11 @@ def cmd_overturn(config, session, args, moment):
             "redo_cost": args.redo_cost,
             "reason": args.reason,
             "found_by": args.found_by,
+            "defect": args.defect,
         }
     )
+    epochs = _epochs(config, session, root.actor, moment)
+    return {**written, "epochs": epochs} if epochs else written
 
 
 def cmd_amend(config, session, args, moment):
@@ -613,6 +638,7 @@ def cmd_amend(config, session, args, moment):
     new = {
         "cost.actor": args.actor_cost,
         "cost.lead": args.lead_cost,
+        "cost.brief": args.brief_cost,
         "minutes.run": args.run_minutes,
         "aop_runs": args.aop_run,
         "commits": args.commit,
@@ -639,10 +665,15 @@ def cmd_amend(config, session, args, moment):
     if args.from_lead_session:
         others = [t.opened for t in session.state.tasks.values() if t.id != task.id]
         runs = new.get("aop_runs", task.close.get("aop_runs") or [])
-        cost = ENV["lead_cost"](config, task, runs, args.lead_session, others)
-        if cost is None:
+        measured = ENV["lead_cost"](config, task, runs, args.lead_session, others)
+        if measured is None:
             raise UsageError(f"no lead session to recompute {task.id}'s lead cost from; give --lead-session")
-        new.setdefault("cost.lead", cost)
+        cost, brief = measured
+        if task.actor == LEAD:
+            new.setdefault("cost.actor", cost)
+        else:
+            new.setdefault("cost.lead", cost)
+            new.setdefault("cost.brief", brief)
     if not new:
         raise UsageError("amend needs a field to correct, --from-aop or --from-lead-session")
 
@@ -667,34 +698,33 @@ def cmd_amend(config, session, args, moment):
 
 
 def cmd_actor_event(config, session, args, moment):
-    if args.kind not in config.kinds:
+    """A person stops or restarts an actor, everywhere or in one kind of this project."""
+    if args.kind is not None and args.kind not in config.kinds:
         raise UsageError(f"unknown kind {args.kind!r}")
-    if args.actor not in config.executors:
-        raise UsageError(f"unknown executor {args.actor!r}")
-    return session.append(
-        {"event": args.command, "at": moment.isoformat(), "actor": args.actor, "kind": args.kind, "reason": args.reason}
-    )
+    if args.actor != LEAD and args.actor not in config.executors:
+        raise UsageError(f"unknown actor {args.actor!r}; actors are the host roster's")
+    event = {"event": args.command, "at": moment.isoformat(), "actor": args.actor, "reason": args.reason}
+    if args.kind is not None:
+        event["kind"] = args.kind
+    return session.append(event)
 
 
 def cmd_scorecard(config, session, args, moment):
-    return {"scorecard": policy.scorecard(config, session.state, _env(config), args.kind)}
+    return {"scorecard": policy.scorecard(_world(config, session), _env(config), moment, args.kind)}
 
 
 def cmd_candidates(config, session, args, moment):
-    """Models aop offers that the project has not configured as executors, with price and pool room."""
+    """Models aop offers that the host roster does not run, with price and pool room."""
     configured = {(e.agent, e.model) for e in config.executors.values()}
     configured |= {(e.agent, f"{e.model}-{e.effort}") for e in config.executors.values() if e.effort}
     pools = {}
     for executor in config.executors.values():
         pools.setdefault(executor.agent, executor.pool)
     agents = set(args.agent or []) or (None if args.all_agents else set(pools))
-    families = [] if args.any_family else [re.compile(p) for p in config.candidate_families]
     by_agent: dict[str, list] = {}
     for entry in ENV["models"]():
         agent, model = entry.get("agent"), entry.get("model")
         if not agent or not model or (agent, model) in configured or (agents is not None and agent not in agents):
-            continue
-        if families and not any(p.search(model) for p in families):
             continue
         by_agent.setdefault(agent, []).append(
             {
@@ -711,7 +741,7 @@ def cmd_candidates(config, session, args, moment):
             key=lambda m: (m["output_per_million_usd"] is None, -(m["output_per_million_usd"] or 0), m["model"]),
         )
         pool = pools.get(agent)
-        room = ENV["pool"](pool, None, None) if pool else None
+        room = ENV["pool"](pool, None) if pool else None
         result.append(
             {
                 "agent": agent,
@@ -739,7 +769,6 @@ COMMANDS = {
     "continue": cmd_continue,
     "suspend": cmd_actor_event,
     "resume": cmd_actor_event,
-    "drop": cmd_actor_event,
     "scorecard": cmd_scorecard,
     "reap": cmd_reap,
     "candidates": cmd_candidates,
@@ -765,8 +794,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--token-cap", type=float)
     s.add_argument("--retry", metavar="TASK")
     s.add_argument("--since", help="when this task started waiting, from a previous wait answer")
-    s.add_argument("--assign", metavar="EXECUTOR", help="open for this executor, skipping the draw and pool room")
+    s.add_argument("--assign", metavar="ACTOR", help="open for this actor, skipping the draw and pool room")
     s.add_argument("--why", help="with --assign: who chose it and why, such as 'user: cursor confirms this fixture'")
+    s.add_argument("--cause", choices=policy.CAUSES, help="with --assign: why the draw was overridden")
 
     s = sub.add_parser("started", help="record what holds the task's reservation")
     s.add_argument("task")
@@ -811,6 +841,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--redo-cost", type=float, required=True)
     s.add_argument("--reason", required=True)
     s.add_argument("--found-by", metavar="TASK")
+    s.add_argument("--defect", choices=("integrity",), help="integrity: the result was fabricated or misreported")
 
     s = sub.add_parser("run", help="start an open task's executor in aop, as agent-job named after the task")
     s.add_argument("task")
@@ -826,6 +857,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--by", default="lead", help="who made the correction (default: lead)")
     s.add_argument("--actor-cost", type=float)
     s.add_argument("--lead-cost", type=float)
+    s.add_argument("--brief-cost", type=float, help="the part of the lead cost spent before the task started")
     s.add_argument("--run-minutes", type=float)
     s.add_argument("--aop-run", nargs="+", action="extend", help="the task's aop runs, replacing the recorded list")
     s.add_argument("--commit", nargs="+", action="extend", help="the task's commits, replacing the recorded list")
@@ -836,10 +868,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--from-lead-session", action="store_true", help="lead cost recomputed from the lead's session")
     s.add_argument("--lead-session", help="the lead's session id (default: DELEGATE_LEAD_SESSION, then the config)")
 
-    for name in ("suspend", "resume", "drop"):
-        s = sub.add_parser(name, help=f"{name} an executor in a kind")
+    for name in ("suspend", "resume"):
+        s = sub.add_parser(name, help=f"{name} an actor, everywhere or in one kind of this project")
         s.add_argument("actor")
-        s.add_argument("kind")
+        s.add_argument("kind", nargs="?")
         s.add_argument("--reason", required=True)
 
     s = sub.add_parser("scorecard", help="print each actor's record per kind")
@@ -847,12 +879,11 @@ def parser() -> argparse.ArgumentParser:
 
     sub.add_parser("reap", help="close opens that never started within the lease")
 
-    s = sub.add_parser("candidates", help="list models aop offers that are not configured as executors")
+    s = sub.add_parser("candidates", help="list models aop offers that the host roster does not run")
     s.add_argument(
         "--agent", nargs="+", action="extend", help="only these agents (default: the agents the project runs)"
     )
     s.add_argument("--all-agents", action="store_true", help="every agent aop offers")
-    s.add_argument("--any-family", action="store_true", help="ignore the config's candidates.families patterns")
     s.add_argument("--limit", type=int, default=10, help="models per agent, priciest first (0 for all; default 10)")
     return top
 

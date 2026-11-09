@@ -1,0 +1,33 @@
+# An example host roster, at ~/.config/delegate/host.toml. See FORMAT.md.
+projects = ["/code/sim/delegate.toml"]
+
+[lead]
+agent = "claude"
+model = "claude-opus-5-5"
+pool = "claude"
+price = 4.0
+
+[actors.terra-max]
+agent = "codex"
+model = "gpt-6.1-terra"
+effort = "max"
+pool = "codex"
+price = 2.0
+
+[actors.sonnet]
+agent = "claude"
+model = "claude-sonnet-5-5"
+pool = "claude"
+price = 1.0
+
+[actors.devin]
+agent = "devin"
+model = "swe-2-high"
+pool = "devin"
+price = 0.5
+
+[pools.devin]
+runs = 2
+
+[resources]
+host-memory-gb = { capacity = 31 }

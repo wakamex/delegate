@@ -2,15 +2,17 @@ import unittest
 from collections import Counter
 from datetime import timedelta
 
+import numpy as np
+
 from delegate import policy
-from delegate.config import ConfigError
+from delegate.config import LEAD, ConfigError
 from delegate.ledger import LedgerError, fold
-from delegate.policy import LEAD, Stats, select, standing
-from tests.helpers import BASE, NOW, Book, env, make_config
+from delegate.policy import SelectError, select
+from tests.helpers import BASE, HOST, NOW, Book, env, make_config, world
 
 
-def choose(config, book, kind="tool", cls="bounded", e=None, **options):
-    return select(config, book.state(), kind, cls, NOW, e or env(), **options)
+def choose(config, book=None, kind="tool", cls="bounded", e=None, **options):
+    return select(world(config, book), e or env(), kind, cls, NOW, **options)
 
 
 class ConfigTests(unittest.TestCase):
@@ -20,38 +22,41 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.resources["memory"].amounts)
         self.assertEqual(config.resources["memory"].capacity, 31)
 
+    def test_actors_come_from_the_host_roster_with_their_family(self):
+        config = make_config()
+        self.assertEqual(sorted(config.executors), ["cheap", "dear"])
+        self.assertEqual((config.executors["dear"].family, config.executors["dear"].price), ("gpt-sol", 3.0))
+        self.assertEqual(config.host.lead.pool, "lead-pool")
+
+    def test_a_host_resource_is_shared_and_declared_once(self):
+        host = HOST + "\n[resources]\ngpu = 1\n"
+        config = make_config(
+            BASE.replace(
+                'classes = ["bounded"]\ninvestigation', 'resources = ["gpu"]\nclasses = ["bounded"]\ninvestigation'
+            ),
+            host=host,
+        )
+        self.assertTrue(config.resource("gpu").shared)
+        with self.assertRaises(ConfigError):
+            make_config(BASE.replace("[resources]\n", "[resources]\ngpu = 1\n"), host=host)
+
     def test_rejects_what_the_workflow_does_not_define(self):
         for bad in (
             "surprise = 1\n" + BASE,
-            BASE + "\nawaitng_cap = 2\n",
             BASE.replace('check = "gated"', 'check = "maybe"'),
-            BASE.replace(
-                'measure = "pass-fail"\nclasses = ["bounded"]\n\n[kinds.probe]',
-                'measure = "pass-fail"\nclasses = []\n\n[kinds.probe]',
-            ),
-            BASE + '\n[kinds.x]\ncheck = "gated"\nstate = "on"\nmeasure = "pass-fail"\nclasses = ["a"]\n'
-            'resources = ["gpu"]\n',
-            BASE + "\n[pools.cheap-pool]\n",
-            BASE + "\n[pools.cheap-pool]\ndollars_per_point = 2\n",
-            BASE + "\n[pools.cheap-pool]\nneeds = 40\n",
-            BASE + "\n[pools.cheap-pool]\nneed = -1\n",
-            BASE + '\n[pools.cheap-pool]\nneed = { "1w" = 25 }\n',
-            BASE + '\n[pools.cheap-pool]\nneed = { "7d" = -1 }\n',
-            BASE + "\n[pools.cheap-pool]\nneed = {}\n",
+            BASE + '\n[kinds.x]\ncheck = "gated"\nmeasure = "pass-fail"\nresources = ["gpu"]\n',
         ):
             with self.assertRaises(ConfigError):
                 make_config(bad)
+        for host in (HOST + "\n[actors.lead]\nagent = 'a'\nmodel = 'b'\n", HOST + "\n[pools.cheap-pool]\nruns = 0\n"):
+            with self.assertRaises(ConfigError):
+                make_config(host=host)
 
     def test_a_removed_key_is_named_with_why_it_went(self):
         for text, key in (
-            (BASE.replace("[lead]\n", '[lead]\ngrain = "task"\n'), "lead.grain"),
-            (
-                BASE.replace(
-                    'classes = ["bounded"]\n\n[kinds.probe]', 'classes = ["bounded"]\nreferences = {}\n\n[kinds.probe]'
-                ),
-                "kinds.recon.references",
-            ),
-            (BASE + "\n[pools.cheap-pool]\nneed_short = 5\n", "pools.cheap-pool.need_short"),
+            (BASE + '\n[executors.x]\nagent = "a"\nmodel = "b"\n', "executors"),
+            (BASE.replace('check = "gated"', 'check = "gated"\nstate = "on"'), "kinds.tool.state"),
+            ("wait_deadline_minutes = 60\n" + BASE, "wait_deadline_minutes"),
         ):
             with self.assertRaisesRegex(ConfigError, f"{key} is no longer used: .*; remove it"):
                 make_config(text)
@@ -61,9 +66,24 @@ class LedgerTests(unittest.TestCase):
     def test_an_overturn_turns_its_root_corrected_with_zero_score(self):
         book = Book()
         root = book.task("port", "cheap", "held", score=80)
+        self.assertTrue(book.state().tasks[root].stood)
         book.add(event="overturn", root=root, redo_cost=12.0, reason="native check")
         task = book.state().tasks[root]
-        self.assertEqual((task.outcome, task.score, task.redo_cost), ("corrected", 0.0, 12.0))
+        self.assertEqual((task.outcome, task.score, task.redo_cost, task.stood), ("corrected", 0.0, 12.0, False))
+        self.assertFalse(task.integrity)
+
+    def test_an_integrity_overturn_marks_the_root_s_defect(self):
+        book = Book()
+        root = book.task("tool", "cheap", "held")
+        book.add(event="overturn", root=root, redo_cost=3.0, reason="faked the gate", defect="integrity")
+        self.assertTrue(book.state().tasks[root].integrity)
+
+    def test_a_deferred_task_has_not_stood_until_its_verdict(self):
+        book = Book()
+        task = book.task("recon", "cheap", "awaiting")
+        self.assertIsNone(book.state().tasks[task].stood)
+        book.add(event="verdict", task=task, outcome="held", evidence=["block 1"])
+        self.assertTrue(book.state().tasks[task].stood)
 
     def test_rejects_events_it_does_not_know(self):
         with self.assertRaises(LedgerError):
@@ -75,433 +95,240 @@ class LedgerTests(unittest.TestCase):
             book.state()
 
 
+def record(book, kind, actor, n, outcome, cost, **options):
+    for _ in range(n):
+        book.task(kind, actor, outcome, cost=cost, **options)
+    return book
+
+
 class SelectionTests(unittest.TestCase):
     def setUp(self):
         self.config = make_config()
 
-    def test_warm_up_takes_an_untried_executor_first(self):
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        result, events = choose(self.config, book)
-        self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "cheap", "warm-up"))
-        self.assertEqual(events[-1]["event"], "open")
+    def test_an_open_records_the_draw_and_its_selection_probabilities(self):
+        answer, events = choose(self.config)
+        event = events[0]
+        self.assertIn(answer["answer"], ("delegate", "lead"))
+        self.assertEqual((event["reason"], event["policy"]), ("draw", policy.__version__))
+        self.assertEqual(set(event["predictions"]), {"cheap", "dear", LEAD})
+        self.assertAlmostEqual(sum(p["p"] for p in event["predictions"].values()), 1.0, places=2)
+        self.assertTrue({"q", "value", "cost", "integrity"} <= set(event["expected"]))
 
-    def test_a_pool_check_carries_the_run_s_expected_dollars(self):
-        # cheap has no record, so its run takes the kind's prior, here dear's $5.
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        pools = env()
-        choose(self.config, book, e=pools)
-        self.assertIn(("cheap-pool", 5.0, None), pools.pool.calls)
-        self.assertIn(("dear-pool", 5.0, None), pools.pool.calls)
+    def test_an_executor_that_succeeds_cheaply_wins_most_draws(self):
+        book = record(Book(), "tool", "cheap", 15, "held", 0.4)
+        record(book, "tool", "dear", 15, "corrected", 3.0, defect="failed-gate")
+        record(book, "tool", LEAD, 5, "held", 4.0)
+        chosen = Counter(choose(self.config, book, e=env(seed=s))[0]["actor"] for s in range(20))
+        self.assertGreaterEqual(chosen["cheap"], 17)
+        self.assertEqual(chosen["dear"], 0)
 
-    def going(self, book, actor="cheap", cost=4.0, lead_cost=0.0):
-        book.add(
-            event="open",
-            task="port-0101",
-            kind="port",
-            **{"class": "bounded"},
-            actor=actor,
-            reason="draw",
-            expected={"actor_cost": cost, "lead_cost": lead_cost},
+    def test_a_cheap_executor_that_never_succeeds_loses_without_being_dropped(self):
+        # Each failure costs the lead a correction, which is what makes a cheap failing executor dear.
+        book = record(Book(), "tool", "cheap", 15, "corrected", 0.4, defect="failed-gate", lead_cost=2.0)
+        record(book, "tool", "dear", 15, "held", 3.0, lead_cost=0.2)
+        record(book, "tool", LEAD, 5, "held", 8.0)
+        answer, events = choose(self.config, book)
+        self.assertEqual(answer["actor"], "dear")
+        self.assertIn("cheap", events[0]["predictions"])  # still drawn, just rarely chosen
+
+    def test_skill_in_one_kind_carries_to_another_kind(self):
+        book = record(Book(), "tool", "cheap", 15, "held", 0.5)
+        record(book, "tool", "dear", 15, "corrected", 0.5, defect="failed-gate")
+        record(book, "probe", "cheap", 3, "held", 0.5)
+        record(book, "probe", "dear", 3, "held", 0.5)
+        heads = policy.fit_heads(world(self.config, book))
+        fc = policy.forecast(
+            world(self.config, book),
+            heads,
+            self.config.kinds["recon"],
+            "bounded",
+            ["cheap", "dear"],
+            NOW,
+            False,
+            np.random.default_rng(0),
         )
+        self.assertGreater(fc.q[:, 0].mean(), fc.q[:, 1].mean())
 
-    def test_a_pool_takes_at_most_its_runs_of_open_tasks(self):
-        # Devin's free-model limit is invisible to its reading; two lockouts came with four runs overlapping.
-        config = make_config(BASE + "\n[pools.cheap-pool]\nruns = 1\n")
+    def test_integrity_defects_raise_an_executor_s_expected_damage(self):
         book = Book()
-        book.task("tool", "cheap", "held", cost=1)
-        book.task("tool", "dear", "held", cost=5)
-        self.going(book)  # open and unclosed, as a task waiting to resume is
-        pools = env()
-        result, _ = choose(config, book, e=pools)
-        self.assertEqual(result["actor"], "dear")
-        self.assertNotIn("cheap-pool", [call[0] for call in pools.pool.calls])
-        result, _ = choose(config, book, e=env(rooms={"cheap-pool": True, "dear-pool": False, "lead-pool": True}))
-        self.assertEqual(result["refused"]["cheap"]["reasons"], ["cheap-pool takes 1 open tasks at once and has 1"])
-        book.add(event="close", task="port-0101", outcome="aborted")
-        pools = env()
-        choose(config, book, e=pools)
-        self.assertIn("cheap-pool", [call[0] for call in pools.pool.calls])  # a closed task frees its place
-        for bad in ("runs = 0", "runs = 1.5", "runs = true"):
-            with self.assertRaises(ConfigError):
-                make_config(BASE + f"\n[pools.cheap-pool]\n{bad}\n")
-
-    def test_runs_already_going_on_a_pool_count_toward_its_check(self):
-        # A $4 port is going on cheap-pool, which admits $8: a $5 run makes $9, so dear is drawn.
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        self.going(book)
-        pools = env(budget={"cheap-pool": 8})
-        result, _ = choose(self.config, book, e=pools)
-        self.assertEqual(result["actor"], "dear")
-        self.assertIn(("cheap-pool", 9.0, None), pools.pool.calls)
-
-    def test_a_pool_without_a_price_also_asks_its_need_for_each_run(self):
-        config = make_config(BASE + "\n[pools.cheap-pool]\nneed = 40\n")
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        self.going(book)
-        pools = env(max_need={"cheap-pool": 60})
-        result, _ = choose(config, book, e=pools)
-        self.assertEqual(result["actor"], "dear")
-        self.assertIn(("cheap-pool", 9.0, 80.0), pools.pool.calls)
-
-    def test_a_need_per_window_is_asked_for_each_run_in_each_window(self):
-        config = make_config(BASE + '\n[pools.cheap-pool]\nneed = { "7d" = 25, "30d" = 6 }\n')
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        self.going(book)
-        pools = env()
-        choose(config, book, e=pools)
-        self.assertIn(("cheap-pool", 9.0, {"7d": 50.0, "30d": 12.0}), pools.pool.calls)
-
-    def test_a_run_on_the_lead_s_pool_carries_its_lead_cost_too(self):
-        config = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))
-        book = Book()
-        book.task("tool", "dear", "held", cost=5, lead_cost=3)
-        pools = env(rooms={"cheap-pool": False, "lead-pool": True})
-        self.assertEqual(choose(config, book, e=pools)[0]["actor"], "dear")
-        self.assertIn(("lead-pool", 8.0, None), pools.pool.calls)
-
-    def test_with_only_untried_executors_on_busy_pools_the_task_waits(self):
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        result, _ = choose(self.config, book, e=env(budget={"cheap-pool": 4, "dear-pool": 4}))
-        self.assertEqual((result["answer"], result["waiting_for"]), ("wait", "cheap-pool"))
-
-    def test_no_second_task_before_a_first_verdict(self):
-        book = Book()
-        book.task("tool", "dear", "held", cost=5)
-        book.add(
-            event="open",
-            task="tool-0100",
-            kind="tool",
-            **{"class": "bounded"},
-            actor="cheap",
-            reason="warm-up",
-            resources={},
-        )
-        result, _ = choose(self.config, book)
-        self.assertEqual(result["actor"], "dear")
-
-    def test_draw_prefers_the_cheaper_cost_per_success(self):
-        book = Book()
-        for _ in range(6):
-            book.task("tool", "cheap", "held", cost=0.5)
-            book.task("tool", "dear", "held", cost=5.0)
-        picks = Counter(choose(self.config, book, e=env(seed=s))[0]["actor"] for s in range(40))
-        self.assertGreater(picks["cheap"], picks["dear"])
-
-    def test_a_cheap_executor_that_never_succeeds_is_dropped(self):
-        # Its success rate is 94% likely below one half at 0 of 3 (Beta(1, 4)), and 88% at 0 of 2.
-        book = Book()
-        for _ in range(10):
-            book.task("tool", "dear", "held", cost=0.5)
-        for _ in range(2):
-            book.task("tool", "cheap", "corrected", cost=0.2)
-        _, events = choose(self.config, book)
-        self.assertFalse([e for e in events if e["event"] == "drop"])
-        book.task("tool", "cheap", "corrected", cost=0.2)
-        result, events = choose(self.config, book)
-        self.assertEqual(result["actor"], "dear")
-        self.assertEqual([e["actor"] for e in events if e["event"] == "drop"], ["cheap"])
-
-    def test_two_executors_of_similar_cost_per_success_are_both_kept(self):
-        book = Book()
-        for _ in range(6):
-            book.task("tool", "cheap", "held", cost=1.0)
-            book.task("tool", "dear", "held", cost=1.1)
-        _, events = choose(self.config, book)
-        self.assertFalse([e for e in events if e["event"] == "drop"])
-
-    def test_an_executor_that_mostly_fails_a_kind_is_dropped_from_it(self):
-        book = Book()
-        book.task("port", "cheap", "held", score=70)
-        for _ in range(4):
-            book.task("port", "cheap", "corrected")
-        _, events = choose(self.config, book, kind="port")
-        self.assertIn("cheap", [e["actor"] for e in events if e["event"] == "drop"])
-
-    def test_a_reliable_executor_is_not_dropped_for_costing_more_than_another(self):
-        # concord's record: Devin held 12 of 12 diagnoses at about $2 each beside Luna at $0.17. Dropping Devin
-        # would leave only Luna, whose Codex pool can be exhausted; the draw already prefers the cheaper one.
-        book = Book()
-        for _ in range(12):
-            book.task("tool", "dear", "held", cost=2.0)
-            book.task("tool", "cheap", "held", cost=0.17)
-        _, events = choose(self.config, book)
-        self.assertFalse([e for e in events if e["event"] == "drop"])
-
-    def test_an_executor_is_dropped_when_the_lead_is_probably_cheaper(self):
-        book = Book()
-        for _ in range(6):
-            book.task("tool", LEAD, "held", cost=0.5, lead_cost=None)
-            book.task("tool", "dear", "held", cost=10.0)
-        _, events = choose(self.config, book)
-        self.assertEqual([e["actor"] for e in events if e["event"] == "drop"], ["dear"])
-
-    def test_one_integrity_correction_suspends_in_reviewed_kinds_only(self):
-        book = Book()
-        for _ in range(2):
+        for i in range(20):
             book.task("port", "cheap", "held", score=70)
-        book.task("port", "cheap", "corrected", defect="integrity")
-        book.task("tool", "cheap", "corrected", defect="integrity")
-        state = book.state()
-        self.assertEqual(standing(Stats(self.config, state, self.config.kinds["port"], env()), "cheap"), "suspended")
-        self.assertEqual(standing(Stats(self.config, state, self.config.kinds["tool"], env()), "cheap"), "active")
-        book.add(event="resume", actor="cheap", kind="port", reason="reviewed")
-        self.assertEqual(
-            standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
+            book.task("port", "dear", "held", score=70)
+            if i % 4 == 0:
+                book.task("port", "cheap", "corrected", defect="integrity", score=0)
+        w = world(self.config, book)
+        heads = policy.fit_heads(w)
+        fc = policy.forecast(
+            w, heads, self.config.kinds["port"], "bounded", ["cheap", "dear"], NOW, False, np.random.default_rng(0)
         )
+        self.assertGreater(fc.integrity[:, 0].mean(), fc.integrity[:, 1].mean())
 
-    def test_an_amend_changes_only_what_it_may_and_only_on_a_closed_task(self):
-        book = Book()
-        task = book.task("tool", "cheap", "held", cost=0)
-        book.add(event="amend", task=task, changes={"cost.actor": {"old": 0, "new": 0.99}})
-        self.assertEqual(book.state().tasks[task].cost("actor"), 0.99)
-        book.add(event="amend", task=task, changes={"outcome": {"old": "held", "new": "corrected"}})
-        with self.assertRaisesRegex(LedgerError, "which an amend cannot change"):
-            book.state()
-
-    def test_the_scorecard_gives_spend_per_accepted_result_with_failures_and_aborts_in_the_spend(self):
-        book = Book()
-        book.task("tool", "cheap", "held", cost=1.0, lead_cost=0.5)
-        book.task("tool", "cheap", "steered", cost=2.0, lead_cost=1.5)
-        book.task("tool", "cheap", "corrected", cost=1.0, lead_cost=1.0)
-        book.task("tool", "cheap", "aborted", cost=None, lead_cost=2.0)
-        overturned = book.task("tool", "cheap", "held", cost=1.0, lead_cost=0.0)
-        book.add(event="overturn", root=overturned, redo_cost=3.0, reason="reverted")
-        row = next(r for r in policy.scorecard(self.config, book.state(), env(), "tool") if r["actor"] == "cheap")
-        # 1.5 + 3.5 + 2 + 2 + (1 + 3 redo) = 13 spent for the two results that stand
-        self.assertEqual(
-            {k: row[k] for k in ("spend", "accepted", "aborted", "unpriced", "spend_per_accepted")},
-            {"spend": 13.0, "accepted": 2, "aborted": 1, "unpriced": 0, "spend_per_accepted": 6.5},
+    def test_a_suspension_stops_an_actor_everywhere_or_in_one_kind_until_resumed(self):
+        book = Book().add(event="suspend", actor="cheap", kind="tool", reason="test")
+        _, events = choose(self.config, book)
+        self.assertNotIn("cheap", events[0]["predictions"])
+        _, events = choose(self.config, book, kind="probe")
+        self.assertIn("cheap", events[0]["predictions"])
+        book.add(event="resume", actor="cheap", kind="tool", reason="test").add(
+            event="suspend", actor="dear", reason="x"
         )
+        _, events = choose(self.config, book, kind="probe")
+        self.assertEqual(set(events[0]["predictions"]), {"cheap", LEAD})
 
-    def test_a_suspend_event_takes_an_executor_out_of_the_kind_until_resumed(self):
-        # As when a provider locks an account for hours where the pool check cannot see it.
-        book = Book()
-        book.add(event="suspend", actor="cheap", kind="tool", reason="rate limit until 12:11 UTC")
-        tool = self.config.kinds["tool"]
-        self.assertEqual(standing(Stats(self.config, book.state(), tool, env()), "cheap"), "suspended")
-        for _ in range(5):
-            result, _ = choose(self.config, book)
-            self.assertEqual(result["actor"], "dear")
-        self.assertEqual(
-            standing(Stats(self.config, book.state(), self.config.kinds["port"], env()), "cheap"), "active"
+    def test_assign_opens_for_the_named_actor_with_its_reason_and_cause(self):
+        answer, events = choose(self.config, assign="dear", why="user: confirms a fixture", cause="capability")
+        self.assertEqual((answer["actor"], events[0]["reason"], events[0]["cause"]), ("dear", "assigned", "capability"))
+        _, events = choose(self.config, assign="cheap", why="user: wants it")
+        self.assertEqual(events[0]["cause"], "user")
+        with self.assertRaises(SelectError):
+            choose(self.config, assign="cheap")
+        with self.assertRaises(SelectError):
+            choose(self.config, assign="nobody", why="x")
+
+    def test_a_kind_needing_a_capability_draws_only_actors_that_have_it(self):
+        config = make_config(
+            BASE.replace('classes = ["bounded", "hard"]', 'classes = ["bounded", "hard"]\ncapabilities = ["gpu"]'),
+            host=HOST.replace("price = 0.5", 'price = 0.5\ncapabilities = ["gpu"]'),
         )
-        book.add(event="resume", actor="cheap", kind="tool", reason="limit reset")
-        self.assertEqual(standing(Stats(self.config, book.state(), tool, env()), "cheap"), "active")
-
-    def test_a_new_executor_takes_one_task_of_any_class_then_waits_for_its_verdict(self):
-        # No trial and no class ladder: a configured executor warms up on whatever class comes, first-reading here,
-        # and takes no second task in the kind until the first is judged.
-        book = Book()
-        first, events = choose(self.config, book, kind="port", cls="first-reading")
-        self.assertEqual((first["answer"], first["reason"]), ("delegate", "warm-up"))
-        book.add(**{k: v for k, v in events[-1].items()})
-        second, _ = choose(self.config, book, kind="port", cls="first-reading")
-        self.assertEqual(second["reason"], "warm-up")
-        self.assertNotEqual(second["actor"], first["actor"])
-        # A lead-only class stays with the lead.
-        result, _ = choose(self.config, Book(), kind="port", cls="redesign")
-        self.assertEqual((result["answer"], result["actor"]), ("lead", LEAD))
-
-    def test_a_class_s_success_starts_from_the_kind_and_follows_its_own_verdicts(self):
-        book = Book()
-        for _ in range(6):
-            book.task("port", "cheap", "held", score=100, cls="bounded")
-        stats = Stats(self.config, book.state(), self.config.kinds["port"], env())
-        a, b = stats.success_counts("cheap", "first-reading")
-        self.assertAlmostEqual(a / (a + b), 7 / 8)  # its rate in the other classes, as a prior worth two tasks
-        for _ in range(4):
-            book.task("port", "cheap", "corrected", cls="first-reading")
-        stats = Stats(self.config, book.state(), self.config.kinds["port"], env())
-        a, b = stats.success_counts("cheap", "first-reading")
-        self.assertLess(a / (a + b), 0.4)
-        a, b = stats.success_counts("cheap", "bounded")
-        self.assertGreater(a / (a + b), 0.75)  # its own six held, pulled a little by the failures elsewhere
-
-    def test_assign_opens_for_a_named_admitted_executor_with_the_reason_recorded(self):
-        # The pool is full and the draw would warm up another executor; the assignment holds and says why.
-        full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})
-        result, events = choose(self.config, Book(), kind="tool", e=full, assign="dear", why="user: dear confirms it")
-        self.assertEqual((result["answer"], result["actor"], result["reason"]), ("delegate", "dear", "assigned"))
-        self.assertEqual(events[-1]["why"], "user: dear confirms it")
-        # The pool is asked only which account the run lands on; its room does not hold an assignment back.
-        self.assertEqual(full.pool.calls, [("dear-pool", None, None)])
-        with self.assertRaisesRegex(policy.SelectError, "needs --why"):
-            choose(self.config, Book(), kind="tool", assign="dear")
-        # A new executor can be assigned too; a suspended one cannot until it is resumed.
-        self.assertEqual(choose(self.config, Book(), kind="port", assign="dear", why="user")[0]["actor"], "dear")
-        book = Book()
-        book.task("port", "dear", "corrected", defect="integrity")
-        with self.assertRaisesRegex(policy.SelectError, "dear is suspended in port; resume it"):
-            choose(self.config, book, kind="port", assign="dear", why="lead")
-
-    def test_the_open_names_the_account_the_pool_check_chose(self):
-        pools = env(accounts={"cheap-pool": "mcosma", "dear-pool": "mcosma"})
-        result, events = choose(self.config, Book(), e=pools)
-        self.assertEqual((result["account"], events[-1]["account"]), ("mcosma", "mcosma"))
-        result, events = choose(self.config, Book(), e=env())
-        self.assertNotIn("account", events[-1])
-
-    def test_wait_while_pools_are_full_then_the_lead_after_the_deadline(self):
-        full = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": True})
-        result, events = choose(self.config, Book(), e=full)
-        self.assertEqual((result["answer"], result["waiting_for"]), ("wait", "cheap-pool"))
-        # A wait names each executor its pool check refused, with what was asked and why.
-        self.assertEqual(
-            result["refused"]["dear"],
-            {"pool": "dear-pool", "dollars": None, "state": "refused", "reasons": ["dear-pool has no room"]},
-        )
-        self.assertEqual(set(result["refused"]), {"cheap", "dear"})
-        self.assertFalse(events)
-        later = choose(self.config, Book(), e=full, since=NOW - timedelta(minutes=61))[0]
-        self.assertEqual(later["answer"], "lead")
-        no_lead = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": False})
-        self.assertEqual(choose(self.config, Book(), e=no_lead, since=NOW - timedelta(minutes=61))[0]["answer"], "wait")
-
-    def test_a_pool_check_that_cannot_answer_is_an_error_not_a_wait(self):
-        # Another pool with room is still chosen from.
-        result, _ = choose(
-            self.config, Book(), e=env(rooms={"cheap-pool": "error", "dear-pool": True, "lead-pool": True})
-        )
-        self.assertEqual(result["answer"], "delegate")
-        failing = env(rooms={"cheap-pool": "error", "dear-pool": False, "lead-pool": True})
-        result, events = choose(self.config, Book(), e=failing)
-        self.assertEqual((result["answer"], result["error"]), ("error", "could not check cheap-pool"))
-        self.assertEqual(result["refused"]["dear"]["state"], "refused")
-        self.assertFalse(events)
-        # Past the deadline, a lead pool that cannot be checked is named too.
-        failing = env(rooms={"cheap-pool": False, "dear-pool": False, "lead-pool": "error"})
-        result, _ = choose(self.config, Book(), e=failing, since=NOW - timedelta(minutes=61))
-        self.assertEqual((result["answer"], result["refused"]["lead"]["pool"]), ("error", "lead-pool"))
-
-    def test_the_lead_fallback_counts_the_runs_already_going_on_the_lead_s_pool(self):
-        # dear runs on the lead's pool and has a $4 port going there, with $1 of lead cost, which the lead's own
-        # run must leave room for.
-        config = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))
-        book = Book()
-        self.going(book, actor="dear", cost=4.0, lead_cost=1.0)
-        pools = env(rooms={"cheap-pool": False, "lead-pool": True}, budget={"lead-pool": 4})
-        later = choose(config, book, e=pools, since=NOW - timedelta(minutes=61))[0]
-        self.assertEqual((later["answer"], later["waiting_for"]), ("wait", "cheap-pool"))
-        self.assertEqual(pools.pool.calls[-1][0], "lead-pool")
-        self.assertGreaterEqual(pools.pool.calls[-1][1], 5.0)
-
-    def test_named_instances_and_amounts_against_capacity(self):
-        book = Book()
-        first, _ = choose(self.config, book, resources=["checkout", "memory=16"])
-        self.assertEqual(first["resources"], {"checkout": "a", "memory": 16})
-        book.add(
-            event="open",
-            task="tool-0101",
-            kind="tool",
-            **{"class": "bounded"},
-            actor="dear",
-            reason="draw",
-            resources={"checkout": "a", "memory": 16},
-        )
-        second, _ = choose(self.config, book, resources=["checkout", "memory=16"])
-        self.assertEqual((second["answer"], second["waiting_for"]), ("wait", "memory"))
-        third, _ = choose(self.config, book, resources=["checkout", "memory=15"])
-        self.assertEqual(third["resources"]["checkout"], "b")
-
-    def test_a_counted_resource_reserves_the_slots_asked_for(self):
-        # A task that relaunches the live client holds all of it, since a relaunch ends every job on it.
-        config = make_config(BASE.replace("[resources]\n", "[resources]\nlive-client = 2\n"))
-        book = Book()
-        first, _ = choose(config, book, resources=["live-client"])
-        self.assertEqual(first["resources"], {"live-client": 1})
-        book.add(
-            event="open",
-            task="tool-0101",
-            kind="tool",
-            **{"class": "bounded"},
-            actor="dear",
-            reason="draw",
-            resources={"live-client": 1},
-        )
-        whole, _ = choose(config, book, resources=["live-client=2"])
-        self.assertEqual((whole["answer"], whole["waiting_for"]), ("wait", "live-client"))
-        self.assertEqual(choose(config, Book(), resources=["live-client=2"])[0]["resources"], {"live-client": 2})
-        for bad in ("live-client=3", "live-client=1.5", "checkout=2"):
-            with self.assertRaises(ConfigError):
-                choose(config, Book(), resources=[bad])
-
-    def test_quota_due_to_expire_discounts_a_pool_s_runs_without_forcing_them(self):
-        # Both hold 3 of 3; dear costs $5 a run against cheap's $1, plus $1 of the lead's cost each. With dear's
-        # pool far behind its pace its run costs only the lead's dollar, so it wins most draws but not all.
-        def wins(config, marginal, kind="tool"):
-            book = Book()
-            for actor in ("cheap", "dear"):
-                book.add(event="resume", actor=actor, kind=kind, reason="admitted")
-            for _ in range(3):
-                book.task(kind, "cheap", "held", cost=1, lead_cost=1, score=80 if kind == "port" else None)
-                book.task(kind, "dear", "held", cost=5, lead_cost=1, score=80 if kind == "port" else None)
-            results = [choose(config, book, kind=kind, e=env(marginal=marginal, seed=i)) for i in range(60)]
-            return sum(r["actor"] == "dear" for r, _ in results), results[0][1][-1]
-
-        full, _ = wins(self.config, None)
-        spare, event = wins(self.config, {"dear-pool": 0.0})
-        self.assertLess(full, 12)
-        self.assertTrue(30 < spare < 60, spare)
-        self.assertEqual(event["marginal"], {"dear": 0.0})
-        reviewed, _ = wins(self.config, {"dear-pool": 0.0}, kind="port")
-        self.assertGreater(reviewed, 30)
-        # The lead's own pool is never discounted: the lead needs its quota.
-        lead_pool = make_config(BASE.replace('pool = "dear-pool"', 'pool = "lead-pool"'))
-        on_lead, event = wins(lead_pool, {"lead-pool": 0.0})
-        self.assertLess(on_lead, 12)
-        self.assertNotIn("marginal", event)
-
-    def test_deferred_kind_takes_the_cheapest_and_holds_one_task_before_a_verdict(self):
-        book = Book()
-        for actor in ("cheap", "dear"):
-            book.add(event="resume", actor=actor, kind="recon", reason="passed calibration and live task")
-        book.task("recon", "cheap", "awaiting", cost=0.5)
-        book.task("recon", "dear", "awaiting", cost=5.0, verdict="held")
-        result, _ = choose(self.config, book, kind="recon")
-        self.assertEqual((result["actor"], result["reason"]), ("dear", "cheapest"))
+        _, events = choose(config)
+        self.assertEqual(set(events[0]["predictions"]), {"cheap", LEAD})
 
     def test_a_retry_skips_the_actor_that_failed(self):
         book = Book()
-        failed = book.task("tool", "cheap", "corrected", cost=0.1)
-        book.task("tool", "dear", "held", cost=5.0)
-        result, _ = choose(self.config, book, retry=failed)
-        self.assertEqual(result["actor"], "dear")
+        failed = book.task("tool", "cheap", "corrected", defect="failed-gate")
+        for seed in range(5):
+            answer, events = choose(self.config, book, retry=failed, e=env(seed=seed))
+            self.assertNotEqual(answer["actor"], "cheap")
+            self.assertEqual(events[0]["retry_of"], failed)
 
-    def test_lead_score_counts_as_a_fraction_of_a_success(self):
-        book = Book()
-        book.task("port", "cheap", "held", score=30)
-        stats = Stats(self.config, book.state(), self.config.kinds["port"], env())
-        self.assertEqual(policy.counts(stats.final("cheap"), stats.kind), (1.3, 1.7))
+    def test_a_pool_check_carries_the_run_s_cost_and_a_full_pool_is_refused(self):
+        e = env(rooms={"cheap-pool": False, "dear-pool": True, "lead-pool": True})
+        answer, events = choose(self.config, e=e)
+        self.assertNotEqual(answer["actor"], "cheap")
+        self.assertIn("cheap", events[0]["refused"])
+        self.assertTrue(all(d is not None and d > 0 for _, d in e.pool.calls))
 
-    def test_redo_cost_enters_expected_cost(self):
-        book = Book()
-        root = book.task("tool", "cheap", "held", cost=1.0)
-        before = Stats(self.config, book.state(), self.config.kinds["tool"], env()).expected_cost("cheap", "bounded")
-        book.add(event="overturn", root=root, redo_cost=10.0, reason="later")
-        after = Stats(self.config, book.state(), self.config.kinds["tool"], env()).expected_cost("cheap", "bounded")
-        self.assertGreater(after, before + 4)
+    def test_a_pool_takes_at_most_its_runs_across_the_host(self):
+        config = make_config(host=HOST + "\n[pools.dear-pool]\nruns = 1\n")
+        book = Book().add(
+            event="open",
+            task="tool-0001",
+            kind="tool",
+            **{"class": "bounded"},
+            actor="dear",
+            reason="draw",
+            resources={},
+        )
+        _, events = choose(config, book)
+        self.assertIn("dear", events[0]["refused"])
 
-    def test_an_open_records_the_expected_actor_and_lead_costs_apart(self):
-        # Redo cost is spent later, not by this run, so neither recorded part carries it.
-        book = Book()
-        root = book.task("tool", "dear", "held", cost=2, lead_cost=1)
-        book.add(event="overturn", root=root, redo_cost=3, reason="test")
-        book.task("tool", "cheap", "held", cost=2, lead_cost=1)
-        result, events = choose(self.config, book)
-        self.assertEqual(events[-1]["expected"], {"actor_cost": 2.0, "lead_cost": 1.0})
+    def test_with_every_pool_full_the_task_waits_and_a_broken_check_is_an_error(self):
+        full = {"cheap-pool": False, "dear-pool": False, "lead-pool": False}
+        answer, events = choose(self.config, e=env(rooms=full))
+        self.assertEqual((answer["answer"], answer["waiting_for"], events), ("wait", "pool room", []))
+        broken = dict.fromkeys(full, "error")
+        self.assertEqual(choose(self.config, e=env(rooms=broken))[0]["answer"], "error")
 
-    def test_the_lead_is_charged_its_own_cost_once(self):
+    def test_a_pool_the_check_cannot_price_takes_one_run_at_a_time(self):
+        rooms = {"cheap-pool": "unavailable", "dear-pool": False, "lead-pool": False}
+        answer, _ = choose(self.config, e=env(rooms=rooms))
+        self.assertEqual(answer["actor"], "cheap")
+        book = Book().add(
+            event="open",
+            task="tool-0001",
+            kind="tool",
+            **{"class": "bounded"},
+            actor="cheap",
+            reason="draw",
+            resources={},
+        )
+        self.assertEqual(choose(self.config, book, e=env(rooms=rooms))[0]["answer"], "wait")
+
+    def test_the_lead_takes_one_task_at_a_time(self):
+        book = Book().add(
+            event="open",
+            task="tool-0001",
+            kind="tool",
+            **{"class": "bounded"},
+            actor=LEAD,
+            reason="draw",
+            resources={},
+        )
+        _, events = choose(self.config, book)
+        self.assertIn(LEAD, events[0]["refused"])
+
+    def test_the_open_names_the_account_the_pool_check_chose(self):
+        e = env(rooms={"cheap-pool": True, "dear-pool": False, "lead-pool": False}, accounts={"cheap-pool": "b"})
+        answer, events = choose(self.config, e=e)
+        self.assertEqual((answer["account"], events[0]["account"]), ("b", "b"))
+
+    def test_named_instances_and_amounts_against_capacity(self):
         book = Book()
-        book.task("tool", "cheap", "held", cost=1.0, lead_cost=4.0)
-        book.task("tool", LEAD, "held", cost=3.0, lead_cost=None)
-        stats = Stats(self.config, book.state(), self.config.kinds["tool"], env())
-        self.assertAlmostEqual(stats.expected_cost(LEAD, "bounded"), 3.0)
+        for n, resources in enumerate(({"checkout": "a"}, {"checkout": "b", "memory": 20})):
+            book.add(
+                event="open",
+                task=f"tool-{n:04d}",
+                kind="tool",
+                **{"class": "bounded"},
+                actor="cheap",
+                reason="draw",
+                resources=resources,
+            )
+        answer, _ = choose(self.config, book, resources=["checkout"])
+        self.assertEqual((answer["answer"], answer["waiting_for"]), ("wait", "checkout"))
+        self.assertEqual(choose(self.config, book, resources=["memory=12"])[0]["answer"], "wait")
+        self.assertEqual(choose(self.config, book, resources=["memory=11"])[0]["resources"], {"memory": 11})
+        with self.assertRaises(ConfigError):
+            choose(self.config, book, resources=["memory=40"])
+
+    def test_quota_due_to_expire_discounts_a_pool_without_forcing_it(self):
+        book = record(Book(), "tool", "cheap", 10, "held", 1.0)
+        record(book, "tool", "dear", 10, "held", 1.0)
+        free = env(marginal={"dear-pool": 0.0})
+        _, events = choose(self.config, book, e=free)
+        self.assertEqual(events[0]["scarcity"], {"dear": 0.05})
+        self.assertGreater(events[0]["predictions"]["dear"]["p"], events[0]["predictions"]["cheap"]["p"])
+
+
+class EpochTests(unittest.TestCase):
+    def test_an_actor_whose_results_collapse_starts_a_new_epoch(self):
+        config = make_config()
+        book = Book()
+        for i in range(40):
+            task = book.task("tool", "cheap", "held" if i < 25 else "corrected", defect="failed-gate")
+            opened = next(e for e in book.events if e.get("task") == task and e["event"] == "open")
+            opened["expected"] = {"q": 0.9, "cost": 1.0}
+        events = policy.detect_epochs(world(config, book), "cheap", NOW)
+        self.assertEqual([(e["event"], e["actor"], e["signal"]) for e in events], [("epoch", "cheap", "success")])
+        book.add(**{k: v for k, v in events[0].items() if k != "at"})
+        self.assertEqual(
+            policy.row(
+                world(config, book), "test", config.kinds["tool"], "bounded", "cheap", NOW + timedelta(1), "success"
+            ).epoch,
+            1,
+        )
+        self.assertEqual(policy.detect_epochs(world(config, book), "cheap", NOW), [])
+
+    def test_a_steady_actor_does_not(self):
+        config = make_config()
+        book = Book()
+        for i in range(40):
+            task = book.task("tool", "cheap", "held" if i % 10 else "corrected", defect="failed-gate")
+            opened = next(e for e in book.events if e.get("task") == task and e["event"] == "open")
+            opened["expected"] = {"q": 0.9, "cost": 1.0}
+        self.assertEqual(policy.detect_epochs(world(config, book), "cheap", NOW), [])
+
+
+class ScorecardTests(unittest.TestCase):
+    def test_spend_per_standing_result_counts_failures_and_aborts(self):
+        book = Book()
+        book.task("tool", "cheap", "held", cost=1.0, lead_cost=0.5)
+        book.task("tool", "cheap", "corrected", cost=1.0, defect="failed-gate")
+        book.task("tool", "cheap", "aborted", cost=0.5)
+        rows = policy.scorecard(world(make_config(), book), env(), NOW, "tool")
+        row = next(r for r in rows if r["actor"] == "cheap")
+        self.assertEqual((row["tasks"], row["stood"], row["spend"], row["spend_per_stood"]), (3, 1, 3.0, 3.0))
+        self.assertEqual({r["actor"] for r in rows}, {"cheap", "dear", LEAD})
 
 
 if __name__ == "__main__":

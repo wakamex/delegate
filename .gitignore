@@ -4,3 +4,10 @@ __pycache__/
 build/
 dist/
 .aop/
+sim/target/
+# Intermediate work behind the design: reviews, local copies of papers, the superseded roster draft and earlier
+# simulator outputs. The design (proposals/shared-skill.md) and the simulator are tracked.
+research/
+proposals/reviews/
+proposals/host-roster.md
+sim/results/*-v2-*

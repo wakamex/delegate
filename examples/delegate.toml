@@ -1,11 +1,9 @@
-# An example delegate.toml for a game-simulator port. See FORMAT.md.
+# An example delegate.toml for a game-simulator port. Its actors are the host roster's, examples/host.toml. See FORMAT.md.
 project = "sim"
 ledger = "delegate.jsonl"
 lease_minutes = 30
-wait_deadline_minutes = 240
 
 [lead]
-pool = "claude/lead-account"
 session = "0123abcd"
 
 [resources]
@@ -13,41 +11,19 @@ checkout = ["sim-a", "sim-b", "sim-c", "sim-d"]
 live-client = 2
 remote-host = 1
 
-[executors.terra-max]
-agent = "codex"
-model = "gpt-6.1-terra"
-effort = "max"
-pool = "codex"
-
-[executors.sonnet]
-agent = "claude"
-model = "claude-sonnet-5-5"
-pool = "claude/lead-account"
-
-[executors.devin]
-agent = "devin"
-model = "swe-2-high"
-pool = "devin"
-
 [kinds.port]
 check = "reviewed"
-state = "on"
 measure = "lead-score"
 classes = ["bounded", "first-reading", "redesign"]
-class_state = { redesign = "lead-only" }
 resources = ["checkout", "live-client"]
 
 [kinds.tool]
 check = "gated"
-state = "on"
 measure = "pass-fail"
 classes = ["bounded", "cross-cutting"]
-resources = ["checkout"]
+resources = ["checkout", "host-memory-gb=16"]
 
 [kinds.investigation]
 check = "reviewed"
-state = "on"
 measure = "lead-score"
-classes = ["bounded"]
 investigation = true
-resources = []

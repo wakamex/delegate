@@ -1,5 +1,12 @@
-"""A project's delegate.toml: what it declares about its kinds, executors and resources."""
+"""Configuration in two files, split by who knows each fact.
 
+The host roster (host.toml) declares the actors on this host and what limits them: each executor's model, effort,
+harness, pool and price, the lead's, pool caps nothing measures, shared machines, and the projects whose ledgers
+the model learns from. A project's delegate.toml declares only its own work: kinds, resources, how to launch, and
+its lead's session. Nothing in a project names a model, a provider, an account or a pool.
+"""
+
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -7,9 +14,10 @@ from pathlib import Path
 
 CONFIG_NAME = "delegate.toml"
 CHECKS = ("gated", "reviewed", "deferred")
-STATES = ("on", "off")
-CLASS_STATES = ("on", "off", "lead-only")
 MEASURES = ("pass-fail", "yield", "lead-score")
+LEAD = "lead"
+# Efforts in order: an effort's skill starts from the one before it.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 class ConfigError(Exception):
@@ -22,33 +30,35 @@ class Resource:
     instances: list[str] | None = None  # named instances, one task each
     capacity: float = 1.0  # slots, or units when amounts is set
     amounts: bool = False  # reserved as amounts of a capacity, such as GB
+    shared: bool = False  # a host resource, counted across every project
 
 
 @dataclass
-class Executor:
+class Actor:
     name: str
     agent: str
     model: str
     effort: str | None
     pool: str | None
+    price: float | None  # the typical cost of one run, the prior for its cost
+    family: str
     capabilities: list[str] = field(default_factory=list)
+    runs: int | None = None  # for the lead: tasks it takes at once
+
+    @property
+    def effort_rank(self) -> int | None:
+        return EFFORTS.index(self.effort) if self.effort in EFFORTS else None
 
 
 @dataclass
 class Kind:
     name: str
     check: str
-    state: str
     measure: str
     classes: list[str]
-    class_state: dict[str, str] = field(default_factory=dict)
     capabilities: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     investigation: bool = False
-
-    def state_of(self, cls: str) -> str:
-        """The class's delegation state: its override, else the kind's."""
-        return self.class_state.get(cls, self.state)
 
 
 @dataclass
@@ -63,27 +73,37 @@ class Launch:
 
 
 @dataclass
+class Host:
+    path: Path | None
+    actors: dict[str, Actor]
+    lead: Actor | None
+    pool_runs: dict[str, int]
+    resources: dict[str, Resource]
+    projects: list[Path]
+
+
+@dataclass
 class Config:
     path: Path
     project: str
     ledger: Path
     lease_minutes: float
-    wait_deadline_minutes: float
-    lead_pool: str | None
     lead_session: str | None
     resources: dict[str, Resource]
-    executors: dict[str, Executor]
     kinds: dict[str, Kind]
-    # Points a run takes of a pool with no measured price: one number for every window, or one per window length.
-    pool_need: dict[str, float | dict[str, float]] = field(default_factory=dict)
-    # The most of the project's tasks open on a pool at once, for a limit its reading cannot show.
-    pool_runs: dict[str, int] = field(default_factory=dict)
-    candidate_families: list[str] = field(default_factory=list)
     launch: Launch = field(default_factory=Launch)
+    host: Host = field(default_factory=lambda: Host(None, {}, None, {}, {}, []))
 
     @property
     def root(self) -> Path:
         return self.path.parent
+
+    @property
+    def executors(self) -> dict[str, Actor]:
+        return self.host.actors
+
+    def resource(self, name: str) -> Resource | None:
+        return self.resources.get(name) or self.host.resources.get(name)
 
 
 def find_config(start: Path) -> Path:
@@ -93,6 +113,23 @@ def find_config(start: Path) -> Path:
         if candidate.is_file():
             return candidate
     raise ConfigError(f"no {CONFIG_NAME} at or above {start}")
+
+
+def host_path() -> Path:
+    """The host roster: DELEGATE_HOST, else $XDG_CONFIG_HOME/delegate/host.toml."""
+    if given := os.environ.get("DELEGATE_HOST"):
+        return Path(given)
+    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "delegate" / "host.toml"
+
+
+def family_of(model: str) -> str:
+    """A model's family: its name without provider, version numbers and effort, such as claude-haiku for
+    claude-haiku-5-5, gpt-terra for gpt-6.1-terra and deepseek-flash for opencode-go/deepseek-v4.1-flash."""
+    name = model.split("/")[-1]
+    tokens = [t for t in re.split(r"-", name) if t]
+    kept = [t for t in tokens if not re.fullmatch(r"v?\d+(\.\d+)*[a-z]?", t) and t not in EFFORTS]
+    return "-".join(kept) or name
 
 
 def _choice(value, allowed, where):
@@ -113,37 +150,25 @@ def _number(value, where, minimum=0.0) -> float:
     return float(value)
 
 
-def _need(value, where) -> float | dict[str, float]:
-    """A pool's need: a number for every window, or a table from window length, such as "7d" or "5h", to points."""
-    if not isinstance(value, dict):
-        return _number(value, where)
-    if not value:
-        raise ConfigError(f"{where} names no window")
-    for length in value:
-        if not re.fullmatch(r"\d+(\.\d+)?[hd]", length):
-            raise ConfigError(f'{where} has window length {length!r}; write it like "5h" or "7d"')
-    return {length: _number(points, f"{where}.{length}") for length, points in value.items()}
+def _whole(value, where) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{where} must be a whole number of at least 1")
+    return value
 
 
-KIND_KEYS = {
-    "check",
-    "state",
-    "measure",
-    "classes",
-    "class_state",
-    "capabilities",
-    "resources",
-    "investigation",
-}
-EXECUTOR_KEYS = {"agent", "model", "effort", "pool", "capabilities"}
-LEAD_KEYS = {"pool", "session"}
-
-
-# Keys a config may still set from an earlier version, with why each went; loading one names it.
+# Keys a project config may still set from an earlier version, with where each went; loading one names it.
 REMOVED = {
+    "executors": "executors are declared once for the host, in the host roster",
+    "pools": "pool limits are declared once for the host, in the host roster",
+    "candidates": "candidate lists were removed; delegate candidates lists aop models the host roster lacks",
+    "pool": "the lead's pool is declared in the host roster's [lead] table",
+    "state": "a kind is never switched off: the lead competes as an actor and wins where it is cheapest",
+    "class_state": "a class is never reserved for the lead: the lead competes as an actor and wins where cheapest",
+    "need": "a pool's run size is measured, not configured",
     "dollars_per_point": "the pool check prices each window from clanker-analytics' measurements",
     "need_short": "the pool check prices each window from clanker-analytics' measurements",
     "grain": "nothing read it",
+    "wait_deadline_minutes": "the lead competes in every draw, so a task waits only for capacity",
     "references": "nothing read it; keep a kind's lead-score reference tasks in the project's notes",
 }
 
@@ -158,114 +183,120 @@ def _known(table, keys, where):
         raise ConfigError(f"unknown keys in {where}: {', '.join(sorted(unknown))}")
 
 
-def _resource(name, value) -> Resource:
-    where = f"resources.{name}"
+def _resource(name, value, where, shared=False) -> Resource:
+    where = f"{where}.{name}"
     if isinstance(value, list):
         instances = _strings(value, where)
         if not instances or len(set(instances)) != len(instances):
             raise ConfigError(f"{where} must list distinct instance names")
-        return Resource(name, instances=instances, capacity=len(instances))
+        return Resource(name, instances=instances, capacity=len(instances), shared=shared)
     if isinstance(value, dict):
         if set(value) != {"capacity"}:
             raise ConfigError(f"{where} as a table takes only capacity")
-        return Resource(name, capacity=_number(value["capacity"], f"{where}.capacity", 1e-9), amounts=True)
+        return Resource(
+            name, capacity=_number(value["capacity"], f"{where}.capacity", 1e-9), amounts=True, shared=shared
+        )
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
-        return Resource(name, capacity=float(value))
+        return Resource(name, capacity=float(value), shared=shared)
     raise ConfigError(f"{where} must be a list of instances, a slot count, or {{ capacity = N }}")
 
 
-def load(path: Path) -> Config:
+ACTOR_KEYS = {"agent", "model", "effort", "pool", "price", "family", "capabilities", "runs"}
+
+
+def _actor(name, value, where) -> Actor:
+    _known(value, ACTOR_KEYS, where)
+    if not isinstance(value.get("agent"), str) or not isinstance(value.get("model"), str):
+        raise ConfigError(f"{where} needs agent and model")
+    effort = value.get("effort")
+    if effort is not None and not isinstance(effort, str):
+        raise ConfigError(f"{where}.effort must be text")
+    return Actor(
+        name,
+        value["agent"],
+        value["model"],
+        effort,
+        value.get("pool"),
+        _number(value["price"], f"{where}.price", 1e-9) if "price" in value else None,
+        value.get("family") or family_of(value["model"]),
+        _strings(value.get("capabilities", []), f"{where}.capabilities"),
+        _whole(value["runs"], f"{where}.runs") if "runs" in value else None,
+    )
+
+
+def load_host(path: Path | None = None) -> Host:
+    """The host roster, or an empty one when the file does not exist."""
+    path = path or host_path()
+    if not path.is_file():
+        return Host(path, {}, None, {}, {}, [])
     try:
         data = tomllib.loads(path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
-    known = {
-        "project",
-        "ledger",
-        "lease_minutes",
-        "wait_deadline_minutes",
-        "lead",
-        "resources",
-        "executors",
-        "kinds",
-        "pools",
-        "candidates",
-        "launch",
-    }
-    if unknown := set(data) - known:
-        raise ConfigError(f"unknown keys in {path.name}: {', '.join(sorted(unknown))}")
+    _known(data, {"projects", "lead", "actors", "pools", "resources"}, path.name)
+    actors = {}
+    for name, value in data.get("actors", {}).items():
+        if name == LEAD:
+            raise ConfigError("an actor may not be named lead; the lead is the [lead] table")
+        actors[name] = _actor(name, value, f"actors.{name}")
+    lead = _actor(LEAD, data["lead"], "lead") if "lead" in data else None
+    pool_runs = {}
+    for name, value in data.get("pools", {}).items():
+        _known(value, {"runs"}, f"pools.{name}")
+        if "runs" in value:
+            pool_runs[name] = _whole(value["runs"], f"pools.{name}.runs")
+    resources = {n: _resource(n, v, "resources", shared=True) for n, v in data.get("resources", {}).items()}
+    projects = [(path.parent / p).resolve() for p in _strings(data.get("projects", []), "projects")]
+    return Host(path, actors, lead, pool_runs, resources, projects)
+
+
+KIND_KEYS = {"check", "measure", "classes", "capabilities", "resources", "investigation"}
+
+
+def load(path: Path, host: Host | None = None) -> Config:
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    _known(
+        data,
+        {"project", "ledger", "lease_minutes", "lead", "resources", "kinds", "launch"},
+        path.name,
+    )
     for key in ("project", "ledger"):
         if not isinstance(data.get(key), str) or not data[key]:
             raise ConfigError(f"{key} is required")
+    host = host if host is not None else load_host()
     lead = data.get("lead", {})
-    _known(lead, LEAD_KEYS, "lead")
-    resources = {name: _resource(name, value) for name, value in data.get("resources", {}).items()}
-    executors = {}
-    for name, value in data.get("executors", {}).items():
-        if name == "lead":
-            raise ConfigError("an executor may not be named lead")
-        _known(value, EXECUTOR_KEYS, f"executors.{name}")
-        if not isinstance(value.get("agent"), str) or not isinstance(value.get("model"), str):
-            raise ConfigError(f"executors.{name} needs agent and model")
-        executors[name] = Executor(
-            name,
-            value["agent"],
-            value["model"],
-            value.get("effort"),
-            value.get("pool"),
-            _strings(value.get("capabilities", []), f"executors.{name}.capabilities"),
-        )
+    _known(lead, {"session"}, "lead")
+    resources = {name: _resource(name, value, "resources") for name, value in data.get("resources", {}).items()}
+    for name in resources:
+        if name in host.resources:
+            raise ConfigError(
+                f"resources.{name} is also a host resource; declare a shared machine once, in the host roster"
+            )
     kinds = {}
     for name, value in data.get("kinds", {}).items():
         where = f"kinds.{name}"
         _known(value, KIND_KEYS, where)
-        for key in ("check", "state", "measure", "classes"):
+        for key in ("check", "measure"):
             if key not in value:
                 raise ConfigError(f"{where}.{key} is required")
-        check = _choice(value["check"], CHECKS, f"{where}.check")
-        classes = _strings(value["classes"], f"{where}.classes")
-        if not classes:
-            raise ConfigError(f"{where}.classes must name at least one class")
-        class_state = value.get("class_state", {})
-        for cls, state in class_state.items():
-            if cls not in classes:
-                raise ConfigError(f"{where}.class_state names unknown class {cls!r}")
-            _choice(state, CLASS_STATES, f"{where}.class_state.{cls}")
+        classes = _strings(value.get("classes", ["any"]), f"{where}.classes") or ["any"]
         reserved = _strings(value.get("resources", []), f"{where}.resources")
         for spec in reserved:
-            if parse_resource_spec(spec)[0] not in resources:
+            name_ = parse_resource_spec(spec)[0]
+            if name_ not in resources and name_ not in host.resources:
                 raise ConfigError(f"{where}.resources names unknown resource {spec!r}")
         kinds[name] = Kind(
             name,
-            check,
-            _choice(value["state"], STATES, f"{where}.state"),
+            _choice(value["check"], CHECKS, f"{where}.check"),
             _choice(value["measure"], MEASURES, f"{where}.measure"),
             classes,
-            class_state,
             _strings(value.get("capabilities", []), f"{where}.capabilities"),
             reserved,
             bool(value.get("investigation", False)),
         )
-    candidates = data.get("candidates", {})
-    _known(candidates, {"families"}, "candidates")
-    families = _strings(candidates.get("families", []), "candidates.families")
-    for pattern in families:
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ConfigError(f"candidates.families has a bad pattern {pattern!r}: {exc}") from exc
-    pool_need, pool_runs = {}, {}
-    for name, value in data.get("pools", {}).items():
-        _known(value, {"need", "runs"}, f"pools.{name}")
-        if not value:
-            raise ConfigError(f"pools.{name} sets nothing")
-        if "need" in value:
-            pool_need[name] = _need(value["need"], f"pools.{name}.need")
-        if "runs" in value:
-            runs = value["runs"]
-            if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
-                raise ConfigError(f"pools.{name}.runs must be a whole number of at least 1")
-            pool_runs[name] = runs
     launch = data.get("launch", {})
     _known(launch, {"workdir", "directory", "profile", "timeout_minutes", "memory"}, "launch")
     for key in ("workdir", "directory", "profile", "memory"):
@@ -276,15 +307,9 @@ def load(path: Path) -> Config:
         project=data["project"],
         ledger=(path.parent / data["ledger"]).resolve(),
         lease_minutes=_number(data.get("lease_minutes", 30), "lease_minutes", 1e-9),
-        wait_deadline_minutes=_number(data.get("wait_deadline_minutes", 240), "wait_deadline_minutes"),
-        lead_pool=lead.get("pool"),
         lead_session=lead.get("session"),
         resources=resources,
-        executors=executors,
         kinds=kinds,
-        pool_need=pool_need,
-        pool_runs=pool_runs,
-        candidate_families=families,
         launch=Launch(
             workdir=launch.get("workdir"),
             directory=launch.get("directory", "."),
@@ -292,6 +317,7 @@ def load(path: Path) -> Config:
             timeout_minutes=_number(launch.get("timeout_minutes", 210), "launch.timeout_minutes", 1),
             memory=launch.get("memory", "12G"),
         ),
+        host=host,
     )
 
 

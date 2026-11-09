@@ -6,91 +6,92 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate.config import load
+from delegate.config import load, load_host
 from delegate.ledger import SCHEMA, fold
-from delegate.policy import Env
+from delegate.policy import Env, World, load_world
 
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
+
+HOST = """
+[lead]
+agent = "claude"
+model = "claude-opus-5-5"
+pool = "lead-pool"
+price = 4.0
+
+[actors.cheap]
+agent = "devin"
+model = "swe-2-high"
+pool = "cheap-pool"
+price = 0.5
+
+[actors.dear]
+agent = "codex"
+model = "gpt-6.1-sol"
+pool = "dear-pool"
+price = 3.0
+"""
 
 BASE = """
 project = "test"
 ledger = "ledger.jsonl"
 lease_minutes = 30
-wait_deadline_minutes = 60
-
-[lead]
-pool = "lead-pool"
 
 [resources]
 checkout = ["a", "b"]
 memory = { capacity = 31 }
 
-[executors.cheap]
-agent = "devin"
-model = "swe-2-high"
-pool = "cheap-pool"
-
-[executors.dear]
-agent = "codex"
-model = "gpt-6.1-sol"
-pool = "dear-pool"
-
 [kinds.tool]
 check = "gated"
-state = "on"
 measure = "pass-fail"
 classes = ["bounded", "hard"]
 
 [kinds.port]
 check = "reviewed"
-state = "on"
 measure = "lead-score"
 classes = ["bounded", "first-reading", "redesign"]
-class_state = { redesign = "lead-only" }
 
 [kinds.recon]
 check = "deferred"
-state = "on"
 measure = "pass-fail"
 classes = ["bounded"]
 
 [kinds.probe]
 check = "reviewed"
-state = "on"
 measure = "pass-fail"
 classes = ["bounded"]
 investigation = true
 """
 
 
-def make_config(text: str = BASE, directory: Path | None = None):
+def make_config(text: str = BASE, directory: Path | None = None, host: str = HOST):
+    """A project config and a host roster in DIRECTORY, the roster at host.toml."""
     directory = directory or Path(tempfile.mkdtemp())
+    (directory / "host.toml").write_text(host)
     path = directory / "delegate.toml"
     path.write_text(text)
-    return load(path)
+    return load(path, load_host(directory / "host.toml"))
 
 
 class FakePools:
-    """Pool room by target, as usage-burn's check gives it: True, False, or "error" for a check that could not
-    answer. A target nobody declared is a bug in the test and raises. BUDGET is the most dollars a target admits,
-    and MAX_NEED the most points for a pool with no measured price."""
+    """Pool room by target, as usage-burn's check gives it: True, False, "error" for a check that could not
+    answer, or "unavailable" for one that cannot price a run. A target nobody declared is a bug in the test and
+    raises. BUDGET is the most dollars a target admits."""
 
-    def __init__(self, rooms: dict[str, bool], marginal=None, budget=None, max_need=None, accounts=None):
+    def __init__(self, rooms: dict, marginal=None, budget=None, accounts=None):
         self.rooms, self.marginal, self.calls, self.accounts = rooms, marginal or {}, [], accounts or {}
-        self.budget, self.max_need = budget or {}, max_need or {}
+        self.budget = budget or {}
 
-    def __call__(self, target, dollars, need):
+    def __call__(self, target, dollars):
         if target not in self.rooms:
             raise AssertionError(f"pool check for undeclared target {target!r}")
-        needs = list(need.values()) if isinstance(need, dict) else [need or 0]
-        if (dollars is not None and dollars < 0) or min(needs) < 0:
+        if dollars is not None and dollars < 0:
             raise AssertionError("negative cost")
-        self.calls.append((target, None if dollars is None else round(dollars, 6), need))
-        fits = (target not in self.budget or (dollars or 0) <= self.budget[target]) and (
-            target not in self.max_need or max(needs) <= self.max_need[target]
-        )
-        if self.rooms[target] == "error":
-            return {"room": False, "marginal": 1.0, "state": "error", "reasons": [f"could not check {target}"]}
+        self.calls.append((target, None if dollars is None else round(dollars, 6)))
+        if self.rooms[target] in ("error", "unavailable"):
+            state = self.rooms[target]
+            return {"room": False, "marginal": 1.0, "state": state, "reasons": [f"could not check {target}"]}
+        fits = target not in self.budget or (dollars or 0) <= self.budget[target]
         room = self.rooms[target] and fits
         return {
             "room": room,
@@ -101,9 +102,15 @@ class FakePools:
         }
 
 
-def env(rooms=None, marginal=None, seed=1, budget=None, max_need=None, accounts=None) -> Env:
+def env(rooms=None, marginal=None, seed=1, budget=None, accounts=None) -> Env:
     rooms = {"cheap-pool": True, "dear-pool": True, "lead-pool": True} if rooms is None else rooms
-    return Env(pool=FakePools(rooms, marginal, budget, max_need, accounts), rng=random.Random(seed))
+    return Env(pool=FakePools(rooms, marginal, budget, accounts), rng=random.Random(seed))
+
+
+def world(config, book=None) -> World:
+    """CONFIG's world with BOOK's events as its ledger, and no other project."""
+    events = book.events if book else []
+    return load_world(config, fold(events), lambda path: fold([]))
 
 
 class Book:

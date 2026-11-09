@@ -10,8 +10,19 @@ from pathlib import Path
 SCHEMA = "delegate-event-1"
 TASK_EVENTS = ("open", "started", "close", "verdict", "amend")
 # The fields of a close an amend may correct, by path; an outcome is changed by an overturn or verdict.
-AMENDABLE = ("cost.actor", "cost.lead", "minutes.run", "aop_runs", "commits", "report", "score.value", "score.reason")
-OTHER_EVENTS = ("overturn", "suspend", "resume", "drop")
+AMENDABLE = (
+    "cost.actor",
+    "cost.lead",
+    "cost.brief",
+    "minutes.run",
+    "aop_runs",
+    "commits",
+    "report",
+    "score.value",
+    "score.reason",
+)
+# drop is read from earlier ledgers as a suspension in its kind; epoch marks a detected change in an actor.
+OTHER_EVENTS = ("overturn", "suspend", "resume", "drop", "epoch")
 OUTCOMES = ("held", "steered", "corrected", "aborted", "awaiting")
 FINAL = ("held", "steered", "corrected")
 
@@ -40,6 +51,7 @@ class Task:
     close: dict | None = None
     verdict: dict | None = None
     overturned: bool = False
+    overturn_defect: str | None = None
     redo_cost: float = 0.0
     amended: set = field(default_factory=set)  # the paths of the close that amends changed
 
@@ -57,6 +69,22 @@ class Task:
         return self.outcome in FINAL
 
     @property
+    def stood(self) -> bool | None:
+        """Whether the result stood, once judged: held or steered against corrected or overturned."""
+        if not self.final:
+            return None
+        return self.outcome in ("held", "steered")
+
+    @property
+    def integrity(self) -> bool:
+        """Whether the result was found to have an integrity defect, in review or later."""
+        return self.overturn_defect == "integrity" or self.defect == "integrity"
+
+    @property
+    def closed_at(self) -> datetime | None:
+        return parse_time(self.close["at"]) if self.close else None
+
+    @property
     def holding(self) -> bool:
         """Whether its reservations are still held."""
         return self.close is None
@@ -64,7 +92,7 @@ class Task:
     @property
     def defect(self) -> str | None:
         if self.overturned:
-            return "overturned"
+            return self.overturn_defect or "overturned"
         record = self.verdict if self.verdict and self.verdict.get("outcome") == "corrected" else self.close
         return (record or {}).get("defect")
 
@@ -120,6 +148,7 @@ def fold(events: list[dict]) -> State:
             if root is None:
                 raise LedgerError(f"line {number} overturns unknown task {event['root']}")
             root.overturned = True
+            root.overturn_defect = event.get("defect") or root.overturn_defect
             root.redo_cost += float(event.get("redo_cost") or 0)
             continue
         if kind in OTHER_EVENTS:

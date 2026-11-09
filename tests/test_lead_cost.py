@@ -25,6 +25,11 @@ TURNS = [
 
 
 class ChargedTurns(unittest.TestCase):
+    def test_a_brief_turn_names_the_task_before_its_unit_exists(self):
+        turns = [(at(0), "open it"), (at(5), "write the brief for tool-0003"), (at(20), "job-port-7 done")]
+        costs = [(at(1), 1.0), (at(6), 2.0), (at(21), 4.0)]
+        self.assertEqual(charged_lead_cost(turns, costs, ["tool-0003", "job-port-7"], at(0)), 7.0)
+
     def test_charges_the_opening_turn_and_the_turns_naming_its_runs(self):
         costs = [(at(1), 1.0), (at(12), 4.0), (at(21), 2.0), (at(31), 8.0)]
         self.assertEqual(charged_lead_cost(TURNS, costs, ["job-port-7"], at(0)), 3.0)
@@ -75,6 +80,7 @@ class SessionActivity(unittest.TestCase):
         )
         book.events[-1]["at"] = at(0).isoformat()
         book.add(event="started", task="t", units=["job-port-7"])
+        book.events[-1]["at"] = at(5).isoformat()
         return fold(book.events).tasks["t"]
 
     def test_charges_the_task_s_turns_at_clanker_analytics_costs(self):
@@ -88,8 +94,9 @@ class SessionActivity(unittest.TestCase):
             return {"turns": TURNS, "costs": costs}
 
         with mock.patch.dict(cli.ENV, {"session_activity": activity}):
-            # The response from weeks earlier, as a fork would copy it in, is left out.
-            self.assertEqual(cli.lead_cost_from_session(config, self.task()), 3.0)
+            # The response from weeks earlier, as a fork would copy it in, is left out. The opening turn, before the
+            # task started, is its brief.
+            self.assertEqual(cli.lead_cost_from_session(config, self.task()), (3.0, 1.0))
             self.assertEqual(asked, ["0123abcd"])
         with mock.patch.dict(cli.ENV, {"session_activity": lambda session: None}):
             self.assertIsNone(cli.lead_cost_from_session(config, self.task()))
@@ -106,10 +113,11 @@ class SessionActivity(unittest.TestCase):
         )
         book.events[-1]["at"] = at(0).isoformat()
         book.add(event="started", task="t", units=["job-port-7"])
+        book.events[-1]["at"] = at(5).isoformat()
         book.add(event="close", task="t", outcome="held")
         book.events[-1]["at"] = at(25).isoformat()
         with mock.patch.dict(cli.ENV, {"session_activity": lambda session: {"turns": turns, "costs": costs}}):
-            self.assertEqual(cli.lead_cost_from_session(config, fold(book.events).tasks["t"]), 3.0)
+            self.assertEqual(cli.lead_cost_from_session(config, fold(book.events).tasks["t"]), (3.0, 1.0))
 
     def test_reads_turns_from_sch_and_costs_from_clanker_analytics(self):
         costs = {

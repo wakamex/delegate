@@ -12,11 +12,12 @@ from pathlib import Path
 from unittest import mock
 
 from delegate import cli
-from tests.helpers import BASE, NOW, FakePools
+from delegate.config import LEAD
+from tests.helpers import BASE, HOST, NOW, FakePools
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).with_name("fixtures") / "aop-result.json"
-NO_POOLS = BASE.replace('pool = "cheap-pool"\n', "").replace('pool = "dear-pool"\n', "")
+NO_POOLS = HOST.replace('pool = "cheap-pool"\n', "").replace('pool = "dear-pool"\n', "")
 
 
 class PoolCheckTests(unittest.TestCase):
@@ -41,12 +42,12 @@ class PoolCheckTests(unittest.TestCase):
 
     def test_admitted_and_priced_at_its_quota_due_to_expire(self):
         # Cursor's month at 0.11x pace leaves about 89 points to expire, so a 1-point run there costs nothing.
-        result, argv = self.check("admitted", "cursor", None, 1.0)
+        result, argv = self.check("admitted", "cursor", None)
         self.assertEqual(result, {"room": True, "marginal": 0.0, "state": "admitted", "reasons": []})
-        self.assertEqual(argv, ["--check", "cursor", "--need", "1.0000"])
+        self.assertEqual(argv, ["--check", "cursor"])
 
     def test_a_provider_with_several_accounts_names_the_one_the_run_lands_on(self):
-        result, argv = self.check("admitted-claude", "claude", 1.0, None)
+        result, argv = self.check("admitted-claude", "claude", 1.0)
         self.assertEqual((result["room"], result["account"]), (True, "second"))
         self.assertEqual(argv, ["--check", "claude", "--cost", "1.0000"])
 
@@ -61,22 +62,15 @@ class PoolCheckTests(unittest.TestCase):
         self.assertEqual(cli.marginal([]), 1.0)
 
     def test_refused_and_unavailable_have_no_room(self):
-        refused, argv = self.check("refused", "devin", None, 40.0)
+        refused, argv = self.check("refused", "devin", 4.0)
         self.assertEqual(refused["room"], False)
         self.assertIn("Daily: 98% used leaves no room for 40 more", refused["reasons"])
-        self.assertEqual(argv, ["--check", "devin", "--need", "40.0000"])
-        unavailable, _ = self.check("unavailable", "zcode", None, None)
+        self.assertEqual(argv, ["--check", "devin", "--cost", "4.0000"])
+        unavailable, _ = self.check("unavailable", "zcode", None)
         self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))
 
-    def test_a_need_per_window_length_is_passed_as_one_option(self):
-        # OpenCode's week just reset, so 25 points of it is over the day's lead; 6 of its half-used month fits.
-        result, argv = self.check("refused-per-window", "opencode", None, {"5h": 25.0, "7d": 25.0, "30d": 6.0})
-        self.assertEqual(argv, ["--check", "opencode", "--need", "5h=25.0000,7d=25.0000,30d=6.0000"])
-        self.assertEqual(result["room"], False)
-        self.assertEqual([r.split(":")[0] for r in result["reasons"]], ["Week (7d)"])
-
     def test_a_check_that_cannot_be_made_has_no_room_and_says_why(self):
-        result, _ = self.check("error", "agy", None, None)
+        result, _ = self.check("error", "agy", None)
         self.assertEqual((result["room"], result["state"]), (False, "error"))
         self.assertIn("name one of Claude and GPT, Gemini as :SCOPE", result["reasons"][0])
         late = subprocess.TimeoutExpired(["usage-burn"], 60)
@@ -84,7 +78,7 @@ class PoolCheckTests(unittest.TestCase):
             mock.patch.object(cli, "USAGE_BURN", "usage-burn"),
             mock.patch.object(cli.subprocess, "run", side_effect=late),
         ):
-            result = cli.pool_check("claude", 18.59, None)
+            result = cli.pool_check("claude", 18.59)
         self.assertEqual((result["room"], result["state"]), (False, "error"))
         self.assertIn("timed out after 60 seconds", result["reasons"][0])
 
@@ -136,6 +130,7 @@ class CliTests(unittest.TestCase):
         self.directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.directory)
         (self.directory / "delegate.toml").write_text(BASE)
+        (self.directory / "host.toml").write_text(HOST)
         self.results = self.directory / "results"
         self.results.mkdir()
         pools = FakePools({"cheap-pool": True, "dear-pool": True, "lead-pool": True})
@@ -152,7 +147,9 @@ class CliTests(unittest.TestCase):
         self.at(NOW)
 
     def at(self, moment):
-        patcher = mock.patch.dict(os.environ, {"DELEGATE_NOW": moment.isoformat()})
+        patcher = mock.patch.dict(
+            os.environ, {"DELEGATE_NOW": moment.isoformat(), "DELEGATE_HOST": str(self.directory / "host.toml")}
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -174,7 +171,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("started", task, "--aop-run", run["run_id"], "--unit", "m4-x")[0], 0)
         code, closed = self.run_cli("close", task, "--outcome", "held", "--lead-cost", "0.75", "--commit", "abc123")
         self.assertEqual(code, 0)
-        self.assertEqual(closed["cost"], {"actor": 2.5, "lead": 0.75})
+        self.assertEqual(closed["cost"], {"actor": 2.5, "lead": 0.75, "brief": None})
         self.assertEqual(closed["minutes"]["run"], 10.0)
         self.assertEqual([e["event"] for e in self.events()], ["open", "started", "close"])
 
@@ -196,16 +193,19 @@ class CliTests(unittest.TestCase):
         code, commits = self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "missed commits")
         self.assertEqual(commits["changes"], {"commits": {"old": [], "new": ["abc123", "def456"]}})
         self.assertEqual(self.run_cli("amend", task, "--commit", "abc123", "def456", "--reason", "again")[0], 2)
-        with mock.patch.dict(cli.ENV, {"lead_cost": lambda *args: 0.25}):
+        with mock.patch.dict(cli.ENV, {"lead_cost": lambda *args: (0.25, 0.1)}):
             code, lead = self.run_cli("amend", task, "--from-lead-session", "--reason", "charged another task's turns")
-        self.assertEqual((code, lead["changes"]), (0, {"cost.lead": {"old": 0.5, "new": 0.25}}))
+        self.assertEqual(
+            (code, lead["changes"]),
+            (0, {"cost.lead": {"old": 0.5, "new": 0.25}, "cost.brief": {"old": None, "new": 0.1}}),
+        )
         _, other = self.run_cli("select", "tool", "bounded")
         self.assertIn(
             "not closed", self.run_cli("amend", other["task"], "--actor-cost", "1", "--reason", "x")[1]["error"]
         )
 
     def test_amend_corrects_a_mistyped_score_and_the_scorecard_counts_the_rescore(self):
-        self.run_cli("drop", "dear", "port", "--reason", "only cheap in this test")
+        self.run_cli("suspend", "dear", "port", "--reason", "only cheap in this test")
         _, port = self.run_cli("select", "port", "bounded", "--assign", "cheap", "--why", "this test")
         self.run_cli("close", port["task"], "--outcome", "held", "--score", "6", "--score-reason", "bounded port")
         code, amend = self.run_cli("amend", port["task"], "--score", "60", "--reason", "typed 6 for 60")
@@ -309,7 +309,7 @@ class CliTests(unittest.TestCase):
         code, error = self.run_cli("close", chosen["task"], "--outcome", "held")
         self.assertEqual(code, 2)
         self.assertIn("awaiting", error["error"])
-        self.run_cli("drop", "dear", "port", "--reason", "only cheap in this test")
+        self.run_cli("suspend", "dear", "port", "--reason", "only cheap in this test")
         _, port = self.run_cli("select", "port", "bounded", "--assign", "cheap", "--why", "this test")
         self.assertIn("needs --score", self.run_cli("close", port["task"], "--outcome", "held")[1]["error"])
         self.assertEqual(
@@ -351,7 +351,7 @@ class CliTests(unittest.TestCase):
         _, again = self.run_cli("select", "tool", "bounded", "--resources", "checkout")
         self.assertEqual(again["resources"], {"checkout": "a"})
 
-    def test_candidates_lists_unconfigured_models_of_the_project_s_agents(self):
+    def test_candidates_lists_models_of_the_roster_s_agents_the_roster_does_not_run(self):
         models = [
             {"agent": "devin", "model": "swe-2-high", "input_per_million_usd": None, "output_per_million_usd": None},
             {"agent": "devin", "model": "swe-3", "input_per_million_usd": 1.0, "output_per_million_usd": 4.0},
@@ -367,19 +367,32 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(c["pool_room"] for c in result["candidates"]))
             _, everything = self.run_cli("candidates", "--all-agents")
             self.assertIn("agy", [c["agent"] for c in everything["candidates"]])
-        config = self.directory / "delegate.toml"
-        config.write_text(config.read_text() + '\n[candidates]\nfamilies = ["^(.*/)?gpt-7", "^swe-[2-9]"]\n')
-        models.append(
-            {"agent": "codex", "model": "gpt-6.5-luna", "input_per_million_usd": 0.1, "output_per_million_usd": 1.0}
+
+    def test_a_lead_task_s_cost_is_its_actor_cost_and_an_executor_s_lead_cost_splits_off_its_brief(self):
+        with mock.patch.dict(cli.ENV, {"lead_cost": lambda *args: (1.5, 0.5)}):
+            _, own = self.run_cli("select", "tool", "bounded", "--assign", LEAD, "--why", "this test")
+            _, closed = self.run_cli("close", own["task"], "--outcome", "held")
+            self.assertEqual(closed["cost"], {"actor": 1.5, "lead": None, "brief": None})
+            _, run = self.run_cli("select", "tool", "bounded", "--assign", "cheap", "--why", "this test")
+            _, closed = self.run_cli("close", run["task"], "--outcome", "held", "--actor-cost", "1")
+            self.assertEqual(closed["cost"], {"actor": 1.0, "lead": 1.5, "brief": 0.5})
+
+    def test_suspend_stops_an_actor_everywhere_or_in_one_kind(self):
+        self.assertEqual(self.run_cli("suspend", "cheap", "--reason", "rate limited")[0], 0)
+        _, chosen = self.run_cli("select", "tool", "bounded")
+        self.assertNotEqual(chosen["actor"], "cheap")
+        self.assertEqual(self.run_cli("suspend", "nobody", "--reason", "x")[0], 2)
+        self.run_cli("resume", "cheap", "--reason", "back")
+        self.assertEqual([e["event"] for e in self.events()][-1], "resume")
+
+    def test_an_overturn_records_an_integrity_defect(self):
+        _, run = self.run_cli("select", "tool", "bounded", "--assign", "cheap", "--why", "this test")
+        self.run_cli("close", run["task"], "--outcome", "held", "--actor-cost", "1", "--lead-cost", "0")
+        code, overturn = self.run_cli(
+            "overturn", run["task"], "--redo-cost", "2", "--reason", "faked the gate", "--defect", "integrity"
         )
-        with mock.patch.dict(cli.ENV, {"models": lambda: models}):
-            _, narrowed = self.run_cli("candidates")
-            self.assertEqual(
-                {c["agent"]: [m["model"] for m in c["models"]] for c in narrowed["candidates"]},
-                {"codex": ["gpt-7"], "devin": ["swe-3"]},
-            )
-            _, wide = self.run_cli("candidates", "--any-family")
-            self.assertIn("gpt-6.5-luna", [m["model"] for c in wide["candidates"] for m in c["models"]])
+        self.assertEqual((code, overturn["defect"]), (0, "integrity"))
+        self.assertTrue(cli.Ledger(self.directory / "ledger.jsonl").read().tasks[run["task"]].integrity)
 
     def test_every_error_prints_json_and_exits_2(self):
         for args in (
@@ -408,8 +421,14 @@ class EntryPointTests(unittest.TestCase):
     def test_selects_running_at_once_give_one_free_instance_to_one(self):
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory)
-        (directory / "delegate.toml").write_text(NO_POOLS.replace('checkout = ["a", "b"]', 'checkout = ["only"]'))
-        env = {**os.environ, "PYTHONPATH": str(ROOT), "DELEGATE_NOW": NOW.isoformat()}
+        (directory / "delegate.toml").write_text(BASE.replace('checkout = ["a", "b"]', 'checkout = ["only"]'))
+        (directory / "host.toml").write_text(NO_POOLS)
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "DELEGATE_NOW": NOW.isoformat(),
+            "DELEGATE_HOST": str(directory / "host.toml"),
+        }
         processes = [
             subprocess.Popen(
                 [sys.executable, "-m", "delegate", "select", "tool", "bounded", "--resources", "checkout"],
@@ -421,7 +440,7 @@ class EntryPointTests(unittest.TestCase):
             for _ in range(6)
         ]
         answers = [json.loads(p.communicate()[0])["answer"] for p in processes]
-        self.assertEqual(sorted(answers), ["delegate"] + ["wait"] * 5)
+        self.assertEqual(sorted(a == "wait" for a in answers), [False] + [True] * 5)
 
 
 if __name__ == "__main__":
