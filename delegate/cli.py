@@ -9,11 +9,12 @@ import re
 import shlex
 import shutil
 import subprocess
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate import policy
-from delegate.config import LEAD, ConfigError, find_config, load
+from delegate.config import LEAD, REMOVED, ConfigError, find_config, load, load_host
 from delegate.ledger import Ledger, LedgerError, parse_time
 from delegate.policy import Env, SelectError
 
@@ -878,6 +879,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("kind", nargs="?")
 
     sub.add_parser("reap", help="close opens that never started within the lease")
+    sub.add_parser(
+        "migrate", help="record who an earlier config's actor names meant, and list the keys the config must drop"
+    )
 
     s = sub.add_parser("candidates", help="list models aop offers that the host roster does not run")
     s.add_argument(
@@ -888,9 +892,41 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def migrate(path: Path, moment: datetime) -> dict:
+    """Record in the project's ledger who each actor name of its earlier config meant, so its tasks keep their
+    actors once the config no longer names them, and list the keys the config must drop. It reads the config as
+    plain TOML, since the current loader rejects an earlier version's keys."""
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data.get("ledger"), str):
+        raise ConfigError("ledger is required")
+    actors = {
+        name: {"agent": e.get("agent"), "model": e.get("model"), "effort": e.get("effort")}
+        for name, e in (data.get("executors") or {}).items()
+        if isinstance(e, dict) and e.get("agent") and e.get("model")
+    }
+    lead = load_host().lead
+    if lead:
+        actors[LEAD] = lead.identity
+    removed = [key for key in data if key in REMOVED]
+    removed += [f"lead.{key}" for key in data.get("lead") or {} if key in REMOVED]
+    for name, kind in (data.get("kinds") or {}).items():
+        removed += [f"kinds.{name}.{key}" for key in kind if key in REMOVED]
+    with Ledger((path.parent / data["ledger"]).resolve()).locked() as session:
+        if session.state.actors == {**session.state.actors, **actors}:
+            return {"actors": {}, "remove": removed, "note": "the ledger already describes these actors"}
+        session.append({"event": "actors", "at": moment.isoformat(), "actors": actors})
+    return {"actors": actors, "remove": removed}
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
+        if args.command == "migrate":
+            print(json.dumps(migrate(args.config or find_config(Path.cwd()), now())))
+            return 0
         config = load(args.config or find_config(Path.cwd()))
         moment = now()
         with Ledger(config.ledger).locked() as session:

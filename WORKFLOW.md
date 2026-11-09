@@ -108,7 +108,7 @@ Subscription quota that expires unused costs almost nothing to spend. A window u
 
 The ledger is one append-only file of events per project, written under a lock and folded by task id into one record per task. Every count, cost and scorecard is recomputed from it; concord's summary table, last updated 2026-10-26 while its log grew to 151 rows, shows what a second copy turns into.
 
-- open, from `select` (the task is then running): task id, kind, class, actor, the retried task if any, the choice's reason and, for an assignment, why and its cause, the predictions and selection probabilities of the draw, the quota prices it applied, and the shared resources reserved;
+- open, from `select` (the task is then running): task id, kind, class, actor and what it is (agent, model and effort), the retried task if any, the choice's reason and, for an assignment, why and its cause, the predictions and selection probabilities of the draw, the quota prices it applied, and the shared resources reserved;
 - started: what runs the task: for an executor the aop run, by its run id, once aop has launched, and for any task the agent-job units it runs, which the lead's turns are matched against. An open with no started event after a project-set lease, 30 minutes by default, is closed as aborted, so a session that dies between select and launch cannot hold the checkout or VM;
 - close, once the result has landed or been discarded, releasing its reservations (a deferred task is then awaiting verdict): outcome, what caught a failure and its defect, brief error if any, resume count, actor cost, lead cost and its brief part, run duration and minutes each shared resource was held. Before closing, the lead re-measures any number the actor reported that would change a decision, on a fresh build;
 - verdict, in a deferred kind: final when the authoritative check has run, its evidence naming that run and the cases it covered. Branches the task left out stay listed as unresolved and do not hold it open; a later failure in one of them is a new task, not an overturn;
@@ -148,5 +148,7 @@ Each choice below was tested in the simulator ([sim/](sim/README.md)) against th
 
 ## Adopting it
 
-- The host roster (`host.toml`) takes the executors from each project's `[executors]` tables, declared once, with a price index for each and the lead as its own entry, and lists every project's config. Each project config drops its executors, pools, kind and class states, candidate families and wait deadline; delegate names each removed key on loading.
-- Existing ledgers carry over unchanged: their tasks are the model's first data, and their drop and suspend events still stop an actor until a person resumes it.
+- The host roster (`host.toml`) takes the executors from each project's `[executors]` tables, declared once, with a price index for each and the lead as its own entry, and lists every project's config. Claude actors share one pool, on which the pool check picks the account.
+- `delegate migrate`, run once per project before its config drops `[executors]`, records in its ledger what each of its actor names meant. Opens record the actor's identity from then on, so concord's `luna` and w3sim's `luna-max`, one model under two names, are one actor to the model.
+- Each project config then drops its executors, pools, kind and class states, candidate families and wait deadline; delegate names each removed key on loading.
+- Existing ledgers otherwise carry over unchanged: their tasks are the model's first data, and their drop and suspend events still stop an actor until a person resumes it.

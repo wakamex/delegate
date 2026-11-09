@@ -9,6 +9,7 @@ import hashlib
 import math
 import pickle
 import random
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, epochs
-from .config import LEAD, Actor, Config, ConfigError, Kind, load, parse_resource_spec
+from .config import EFFORTS, LEAD, Actor, Config, ConfigError, Kind, family_of, load, parse_resource_spec
 from .ledger import State, Task, parse_time
 from .model import COUNT, DRAWS, LOGIT, TWEEDIE, Head, Row, fit
 
@@ -83,25 +84,66 @@ def _actor(config: Config, name: str) -> Actor | None:
     return config.host.actors.get(name)
 
 
-def _epochs(world: World, actor: str, signal: str, before: datetime) -> int:
+def key_of(identity: dict | None, name: str) -> str:
+    """An actor's key in the model: what it is, so one model under two names is one actor and one name reused for
+    another model is two. A name nobody described is its own key."""
+    if not identity or not identity.get("agent") or not identity.get("model"):
+        return f"name:{name}"
+    effort = identity.get("effort")
+    role = identity.get("role")
+    return f"{identity['agent']}/{identity['model']}" + (f"/{effort}" if effort else "") + (f"@{role}" if role else "")
+
+
+def identity(world: World, project: str, name: str, recorded: dict | None = None) -> dict | None:
+    """Who NAME meant in PROJECT: as recorded on the event, else as the project's actors event described it for
+    events before opens recorded it, else the roster's actor of that name."""
+    if recorded:
+        return recorded
+    described = world.projects[project][1].actors.get(name) if project in world.projects else None
+    if described:
+        return described
+    actor = _actor(world.config, name)
+    return actor.identity if actor else None
+
+
+def task_key(world: World, project: str, task: Task) -> str:
+    return key_of(identity(world, project, task.actor, task.open.get("identity")), task.actor)
+
+
+def event_key(world: World, project: str, event: dict) -> str:
+    return key_of(identity(world, project, event.get("actor", ""), event.get("identity")), event.get("actor", ""))
+
+
+def actor_key(config: Config, name: str) -> str:
+    actor = _actor(config, name)
+    return key_of(actor.identity if actor else None, name)
+
+
+def _roster(config: Config) -> dict[str, Actor]:
+    """The roster's actors, the lead included, by key."""
+    actors = [*config.host.actors.values(), *([config.host.lead] if config.host.lead else [])]
+    return {key_of(a.identity, a.name): a for a in actors}
+
+
+def _epochs(world: World, key: str, signal: str, before: datetime) -> int:
     return sum(
         1
-        for _, e in world.events
+        for project, e in world.events
         if e.get("event") == "epoch"
-        and e.get("actor") == actor
         and e.get("signal") == signal
         and parse_time(e["at"]) < before
+        and event_key(world, project, e) == key
     )
 
 
 def _versions(world: World) -> dict[tuple[str, str], int]:
     """Each harness version's rank, by first appearance."""
     first: dict[str, list[str]] = {}
-    for _, _, task in sorted(world.tasks(), key=lambda x: x[2].opened):
+    for project, _, task in sorted(world.tasks(), key=lambda x: x[2].opened):
         version = (task.started or {}).get("harness_version")
-        actor = _actor(world.config, task.actor)
-        if version and actor:
-            seen = first.setdefault(actor.agent, [])
+        ident = identity(world, project, task.actor, task.open.get("identity"))
+        if version and ident:
+            seen = first.setdefault(ident["agent"], [])
             if version not in seen:
                 seen.append(version)
     return {(h, v): i for h, vs in first.items() for i, v in enumerate(vs)}
@@ -112,38 +154,43 @@ def row(
     project: str,
     kind: Kind,
     cls: str,
-    actor: str,
+    key: str,
+    ident: dict | None,
     at: datetime,
     signal: str,
     task: Task | None = None,
     versions=None,
 ) -> Row:
-    a = _actor(world.config, actor)
+    """The task's attributes for the model, for the actor with KEY and IDENTITY."""
+    ident = ident or {}
+    roster = _roster(world.config).get(key)
+    model = ident.get("model")
     version = None
-    if a and task and versions is not None:
+    if task and versions is not None and ident.get("agent"):
         v = (task.started or {}).get("harness_version")
-        version = versions.get((a.agent, v)) if v else None
+        version = versions.get((ident["agent"], v)) if v else None
     retry = 1.0 if task is not None and task.open.get("retry_of") else 0.0
     hard = 1.0 if task is not None and task.open.get("cause") == "difficulty" else 0.0
+    effort = ident.get("effort")
     return Row(
-        actor=actor,
+        actor=key,
         project=project,
         kind=kind.name,
         cls=cls,
         check=kind.check,
-        family=a.family if a else None,
-        model=a.model if a else None,
-        effort=a.effort_rank if a else None,
-        harness=a.agent if a else None,
+        family=roster.family if roster else (family_of(model) if model else None),
+        model=model,
+        effort=EFFORTS.index(effort) if effort in EFFORTS else None,
+        harness=ident.get("agent"),
         version=version,
-        epoch=_epochs(world, actor, signal, at),
+        epoch=_epochs(world, key, signal, at),
         retry=retry,
         hard=hard,
     )
 
 
-def _price(config: Config, actor: str) -> float:
-    a = _actor(config, actor)
+def _price(config: Config, key: str) -> float:
+    a = _roster(config).get(key)
     if a and a.price:
         return a.price
     prices = [x.price for x in config.host.actors.values() if x.price]
@@ -172,7 +219,7 @@ def fit_id(world: World) -> str:
         config, state = world.projects[project]
         digest.update(config.path.read_bytes())
         for event in state.events:
-            if event.get("event") in ("close", "verdict", "amend", "overturn", "epoch", "started"):
+            if event.get("event") in ("close", "verdict", "amend", "overturn", "epoch", "started", "actors"):
                 digest.update(repr(sorted(event.items())).encode())
     return digest.hexdigest()[:16]
 
@@ -192,8 +239,10 @@ def fit_heads(world: World, cache: Path | None = None) -> Heads:
         if kind is None:
             continue
         cls = task.cls if task.cls in kind.classes else kind.classes[0]
-        r_success = row(world, project, kind, cls, task.actor, task.opened, "success", task, versions)
-        r_cost = row(world, project, kind, cls, task.actor, task.opened, "cost", task, versions)
+        key = task_key(world, project, task)
+        ident = identity(world, project, task.actor, task.open.get("identity"))
+        r_success = row(world, project, kind, cls, key, ident, task.opened, "success", task, versions)
+        r_cost = row(world, project, kind, cls, key, ident, task.opened, "cost", task, versions)
         stood = task.stood
         if stood is not None:
             data["q"].append((r_success, float(stood)))
@@ -206,7 +255,7 @@ def fit_heads(world: World, cache: Path | None = None) -> Heads:
         if task.close and task.outcome != "aborted":
             actor_cost = task.cost("actor")
             if actor_cost is not None:
-                data["cost"].append((r_cost, actor_cost, math.log(_price(config, task.actor))))
+                data["cost"].append((r_cost, actor_cost, math.log(_price(world.config, key))))
             if task.actor != LEAD:
                 brief = task.cost("brief")
                 lead = task.cost("lead")
@@ -309,9 +358,11 @@ def forecast(
     rng: np.random.Generator,
     m: int = DRAWS + 1,
 ) -> Forecast:
-    project = world.config.project
-    succ = [row(world, project, kind, cls, a, at, "success") for a in actors]
-    cost_rows = [row(world, project, kind, cls, a, at, "cost") for a in actors]
+    project, config = world.config.project, world.config
+    keys = [actor_key(config, a) for a in actors]
+    idents = [a.identity if (a := _actor(config, name)) else None for name in actors]
+    succ = [row(world, project, kind, cls, k, i, at, "success") for k, i in zip(keys, idents, strict=True)]
+    cost_rows = [row(world, project, kind, cls, k, i, at, "cost") for k, i in zip(keys, idents, strict=True)]
     for r in succ + cost_rows:
         r.retry = 1.0 if retry else 0.0
     c = len(actors)
@@ -329,7 +380,7 @@ def forecast(
     else:
         value = np.ones((m, c))
     integrity = logit_draws(heads.integrity, succ, -4.0)
-    offsets = np.array([math.log(_price(world.config, a)) for a in actors])
+    offsets = np.array([math.log(_price(config, k)) for k in keys])
     if heads.cost is not None:
         eta, _ = heads.cost.draws(cost_rows, rng, m, offset=offsets)
         cost = np.exp(eta)
@@ -402,8 +453,9 @@ def reserve(world: World, specs: list[str]) -> tuple[dict | None, str | None]:
 def suspended(world: World, actor: str, kind: str) -> bool:
     """Whether a person suspended ACTOR, everywhere or in KIND of this project, and has not resumed it."""
     last_stop, last_go = None, None
+    key = actor_key(world.config, actor)
     for project, event in world.events:
-        if event.get("actor") != actor:
+        if event.get("event") not in ("suspend", "drop", "resume") or event_key(world, project, event) != key:
             continue
         name = event.get("event")
         scoped = event.get("kind")
@@ -445,7 +497,7 @@ def select(
         raise SelectError(f"unknown class {cls!r} for kind {kind_name}; classes are {', '.join(kind.classes)}")
     if retry and retry not in state.tasks:
         raise SelectError(f"unknown task {retry!r} to retry")
-    excluded = state.tasks[retry].actor if retry else None
+    excluded = task_key(world, config.project, state.tasks[retry]) if retry else None
     specs = resources if resources is not None else kind.resources
     reservation, busy = reserve(world, specs)
     answer = {"kind": kind_name, "class": cls}
@@ -489,11 +541,11 @@ def select(
     candidates = [
         name
         for name, actor in host.actors.items()
-        if name != excluded
+        if actor_key(config, name) != excluded
         and set(kind.capabilities) <= set(actor.capabilities)
         and not suspended(world, name, kind_name)
     ]
-    lead_ok = excluded != LEAD and not suspended(world, LEAD, kind_name)
+    lead_ok = excluded != actor_key(config, LEAD) and not suspended(world, LEAD, kind_name)
     actors = candidates + ([LEAD] if lead_ok else [])
     if not actors:
         return {
@@ -506,8 +558,10 @@ def select(
     open_tasks = holding(world)
     refused: dict[str, dict] = {}
     rooms: dict[str, dict] = {}
-    for j, name in enumerate(actors):
-        room = _room(world, env, name, fc, j, open_tasks)
+    # Each check is a usage-burn process; run them at once rather than one actor after another.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        checked = list(pool.map(lambda j: _room(world, env, actors[j], fc, j, open_tasks), range(len(actors))))
+    for name, room in zip(actors, checked, strict=True):
         rooms[name] = room
         if not room["room"]:
             refused[name] = room
@@ -560,13 +614,20 @@ def select(
 def _room(world: World, env: Env, name: str, fc: Forecast, j: int, open_tasks) -> dict:
     """Whether ACTOR's pool has room for one more run: its cap across the host, then the pool check at the run's
     upper quantile of cost with what is already open there. A pool the check cannot price takes one run at a time."""
+    roster = _roster(world.config)
+    open_keys = [(p, t, task_key(world, p, t)) for p, t in open_tasks]
+    return _pool_room(world, env, name, fc, j, open_keys, roster)
+
+
+def _pool_room(world, env, name, fc, j, open_keys, roster) -> dict:
     host = world.config.host
     actor = host.lead if name == LEAD else host.actors.get(name)
     pool = actor.pool if actor else None
     mean_cost = float(fc.cost[:, j].mean())
     upper = mean_cost * math.exp(1.28 * float(fc.cost_sd[j]))
     if name == LEAD:
-        lead_open = sum(1 for _, t in open_tasks if t.actor == LEAD)
+        lead_key = actor_key(world.config, LEAD)
+        lead_open = sum(1 for _, _, k in open_keys if k == lead_key)
         most = actor.runs if actor and actor.runs else 1
         if lead_open >= most:
             return {
@@ -574,9 +635,7 @@ def _room(world: World, env: Env, name: str, fc: Forecast, j: int, open_tasks) -
                 "state": "refused",
                 "reasons": [f"the lead takes {most} tasks at once and has {lead_open}"],
             }
-    on_pool = [
-        t for _, t in open_tasks if pool and (lambda a: a is not None and a.pool == pool)(_actor(world.config, t.actor))
-    ]
+    on_pool = [t for _, t, k in open_keys if pool and k in roster and roster[k].pool == pool]
     if pool and (most := host.pool_runs.get(pool)) is not None and len(on_pool) >= most:
         return {
             "room": False,
@@ -617,6 +676,7 @@ def _open(world, kind, cls, actor, reason, fc, predictions, reservation, token_c
         "kind": kind.name,
         "class": cls,
         "actor": actor,
+        "identity": identity(world, world.config.project, actor),
         "reason": reason,
         "resources": reservation or {},
         "token_cap": token_cap,
@@ -664,18 +724,20 @@ def detect_epochs(world: World, actor: str, now: datetime) -> list[dict]:
     if actor == LEAD:
         return []
     out = []
-    mine = [(p, c, t) for p, c, t in world.tasks() if t.actor == actor]
+    key = actor_key(world.config, actor)
+    mine = [(p, c, t) for p, c, t in world.tasks() if task_key(world, p, t) == key]
     last = {
         s: max(
             (
                 parse_time(e["at"])
-                for _, e in world.events
-                if e.get("event") == "epoch" and e.get("actor") == actor and e.get("signal") == s
+                for p, e in world.events
+                if e.get("event") == "epoch" and e.get("signal") == s and event_key(world, p, e) == key
             ),
             default=None,
         )
         for s in ("success", "cost")
     }
+    stamp = {"event": "epoch", "at": now.isoformat(), "actor": actor, "identity": identity(world, "", actor)}
     # Success: each result against its predicted chance, shifted by how its kind is going for everyone lately.
     judged = sorted(
         ((t, p) for p, _, t in mine if t.stood is not None and (t.open.get("expected") or {}).get("q") is not None),
@@ -688,11 +750,9 @@ def detect_epochs(world: World, actor: str, now: datetime) -> list[dict]:
             if last["success"] and when <= last["success"]:
                 continue
             q = min(max(float(task.open["expected"]["q"]), 1e-3), 1 - 1e-3)
-            obs.append((math.log(q / (1 - q)) + _trend(world, project, task, actor), 1.0 if task.stood else 0.0))
+            obs.append((math.log(q / (1 - q)) + _trend(world, project, task, key), 1.0 if task.stood else 0.0))
         if epochs.changed("success", obs):
-            out.append(
-                {"event": "epoch", "at": now.isoformat(), "actor": actor, "signal": "success", "observations": len(obs)}
-            )
+            out.append({**stamp, "signal": "success", "observations": len(obs)})
     costed = sorted(
         (t for _, _, t in mine if t.cost("actor") and (t.open.get("expected") or {}).get("cost")),
         key=lambda t: t.closed_at,
@@ -704,13 +764,11 @@ def detect_epochs(world: World, actor: str, now: datetime) -> list[dict]:
             if not (last["cost"] and t.closed_at <= last["cost"])
         ]
         if epochs.changed("cost", obs):
-            out.append(
-                {"event": "epoch", "at": now.isoformat(), "actor": actor, "signal": "cost", "observations": len(obs)}
-            )
+            out.append({**stamp, "signal": "cost", "observations": len(obs)})
     return out
 
 
-def _trend(world: World, project: str, task: Task, actor: str) -> float:
+def _trend(world: World, project: str, task: Task, key: str) -> float:
     """How the task's kind went for other actors in the ten results judged before it, against their predictions."""
     when = _judged_at(task)
     _, state = world.projects[project]
@@ -718,7 +776,7 @@ def _trend(world: World, project: str, task: Task, actor: str) -> float:
         t
         for t in state.tasks.values()
         if t.kind == task.kind
-        and t.actor != actor
+        and task_key(world, project, t) != key
         and t.stood is not None
         and _judged_at(t) < when
         and (t.open.get("expected") or {}).get("q")
@@ -735,22 +793,30 @@ def _trend(world: World, project: str, task: Task, actor: str) -> float:
 
 
 def scorecard(world: World, env: Env, now: datetime, only: str | None = None) -> list[dict]:
-    """Each actor's record and current forecast per kind of this project."""
+    """Each actor's record and current forecast per kind of this project. Tasks count toward the roster actor they
+    were, under any name; an actor no longer in the roster keeps its record under its old name, without a forecast."""
     config = world.config
-    state = world.projects[config.project][1]
+    project = config.project
+    state = world.projects[project][1]
     heads = fit_heads(world, env.cache)
     rng = np.random.default_rng(0)
+    roster = [*config.host.actors, LEAD]
+    label = {actor_key(config, name): name for name in roster}
     rows = []
     for kind in config.kinds.values():
         if only and kind.name != only:
             continue
-        names = list(
-            dict.fromkeys([*config.host.actors, LEAD, *(t.actor for t in state.tasks.values() if t.kind == kind.name)])
-        )
-        fc = forecast(world, heads, kind, kind.classes[0], names, now, False, rng, m=200)
+        mine: dict[str, list[Task]] = {}
+        for task in state.tasks.values():
+            if task.kind == kind.name:
+                key = task_key(world, project, task)
+                label.setdefault(key, task.actor)
+                mine.setdefault(key, []).append(task)
+        fc = forecast(world, heads, kind, kind.classes[0], roster, now, False, rng, m=200)
         units = fc.unit({}, 1.0)
-        for j, name in enumerate(names):
-            tasks = [t for t in state.tasks.values() if t.kind == kind.name and t.actor == name]
+        for key in dict.fromkeys([*(actor_key(config, n) for n in roster), *mine]):
+            name, tasks = label[key], mine.get(key, [])
+            j = roster.index(name) if name in roster else None
             final = [t for t in tasks if t.stood is not None]
             spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) for t in tasks if t.close)
             stood = sum(1 for t in final if t.stood)
@@ -758,19 +824,22 @@ def scorecard(world: World, env: Env, now: datetime, only: str | None = None) ->
                 {
                     "kind": kind.name,
                     "actor": name,
-                    "suspended": suspended(world, name, kind.name),
+                    "names": sorted({t.actor for t in tasks} - {name}) or None,
+                    "suspended": suspended(world, name, kind.name) if j is not None else None,
                     "tasks": len(tasks),
                     "pending": sum(1 for t in tasks if t.stood is None and t.outcome != "aborted"),
                     "verdicts": len(final),
                     "stood": stood,
                     "integrity": sum(1 for t in final if t.integrity),
                     "rescored": sum("score.value" in t.amended for t in final),
-                    "epochs": sum(1 for _, e in world.events if e.get("event") == "epoch" and e.get("actor") == name),
+                    "epochs": sum(
+                        1 for p, e in world.events if e.get("event") == "epoch" and event_key(world, p, e) == key
+                    ),
                     "spend": round(spend, 2),
                     "spend_per_stood": round(spend / stood, 2) if stood else None,
-                    "q": round(float(fc.q[:, j].mean()), 3),
-                    "cost": round(float(fc.cost[:, j].mean()), 2),
-                    "unit": round(float(np.median(units[:, j])), 2),
+                    "q": None if j is None else round(float(fc.q[:, j].mean()), 3),
+                    "cost": None if j is None else round(float(fc.cost[:, j].mean()), 2),
+                    "unit": None if j is None else round(float(np.median(units[:, j])), 2),
                 }
             )
     return rows

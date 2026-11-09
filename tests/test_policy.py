@@ -290,6 +290,43 @@ class SelectionTests(unittest.TestCase):
         self.assertGreater(events[0]["predictions"]["dear"]["p"], events[0]["predictions"]["cheap"]["p"])
 
 
+class IdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.config = make_config()
+
+    def test_an_open_records_what_the_actor_is(self):
+        _, events = choose(self.config, assign="dear", why="this test")
+        self.assertEqual(events[0]["identity"], {"agent": "codex", "model": "gpt-6.1-sol", "effort": None})
+
+    def test_the_lead_is_not_the_executor_running_its_model(self):
+        config = make_config(host=HOST + '\n[actors.opus]\nagent = "claude"\nmodel = "claude-opus-5-5"\n')
+        self.assertNotEqual(policy.actor_key(config, "opus"), policy.actor_key(config, LEAD))
+
+    def test_an_actors_event_says_who_old_names_meant(self):
+        # Before opens recorded identities, this project called the roster's cheap actor "devin".
+        book = Book().add(event="actors", actors={"devin": {"agent": "devin", "model": "swe-2-high", "effort": None}})
+        task = book.task("tool", "devin", "held")
+        w = world(self.config, book)
+        self.assertEqual(policy.task_key(w, "test", w.projects["test"][1].tasks[task]), "devin/swe-2-high")
+        self.assertEqual(policy.actor_key(self.config, "cheap"), "devin/swe-2-high")
+        row = next(r for r in policy.scorecard(w, env(), NOW, "tool") if r["actor"] == "cheap")
+        self.assertEqual((row["tasks"], row["names"]), (1, ["devin"]))
+
+    def test_one_name_for_another_model_is_another_actor(self):
+        book = Book().add(event="actors", actors={"cheap": {"agent": "devin", "model": "swe-1", "effort": None}})
+        book.task("tool", "cheap", "held")
+        rows = policy.scorecard(world(self.config, book), env(), NOW, "tool")
+        mine = next(r for r in rows if r["actor"] == "cheap" and r["q"] is not None)
+        self.assertEqual(mine["tasks"], 0)
+        self.assertEqual(sum(r["tasks"] for r in rows), 1)
+
+    def test_a_suspension_under_an_old_name_stops_the_actor_it_meant(self):
+        book = Book().add(event="actors", actors={"devin": {"agent": "devin", "model": "swe-2-high", "effort": None}})
+        book.add(event="suspend", actor="devin", kind="tool", reason="locked out")
+        _, events = choose(self.config, book)
+        self.assertNotIn("cheap", events[0]["predictions"])
+
+
 class EpochTests(unittest.TestCase):
     def test_an_actor_whose_results_collapse_starts_a_new_epoch(self):
         config = make_config()
@@ -303,7 +340,14 @@ class EpochTests(unittest.TestCase):
         book.add(**{k: v for k, v in events[0].items() if k != "at"})
         self.assertEqual(
             policy.row(
-                world(config, book), "test", config.kinds["tool"], "bounded", "cheap", NOW + timedelta(1), "success"
+                world(config, book),
+                "test",
+                config.kinds["tool"],
+                "bounded",
+                policy.actor_key(config, "cheap"),
+                config.executors["cheap"].identity,
+                NOW + timedelta(1),
+                "success",
             ).epoch,
             1,
         )

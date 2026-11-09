@@ -46,8 +46,11 @@ class Actor:
     runs: int | None = None  # for the lead: tasks it takes at once
 
     @property
-    def effort_rank(self) -> int | None:
-        return EFFORTS.index(self.effort) if self.effort in EFFORTS else None
+    def identity(self) -> dict:
+        """What the actor is, recorded on every open so a ledger never depends on the roster's names. The lead is
+        its model in another role: it shares the model's family and model terms, not its record."""
+        identity = {"agent": self.agent, "model": self.model, "effort": self.effort}
+        return {**identity, "role": LEAD} if self.name == LEAD else identity
 
 
 @dataclass

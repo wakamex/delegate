@@ -92,6 +92,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 |---|---|
 | `kind`, `class` | from the config |
 | `actor` | an actor name from the host roster, or `"lead"` |
+| `identity` | what the actor is: `{"agent": .., "model": .., "effort": ..}`. The model knows actors by this, not by name, so one model under two names is one actor and a name later reused for another model is another, and a ledger stays readable after the roster changes |
 | `reason` | `draw` or `assigned`; older events may say `warm-up`, `cheapest`, `lead`, `admit` or `catch-up` |
 | `seed` | the draw's seed |
 | `predictions` | for `draw`: each eligible actor's predicted cost per standing result (`unit`), its spread (`sd`) and the share of 257 posterior draws in which it was lowest (`p`) |
@@ -141,7 +142,9 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 `suspend` and `resume`: `actor`, `reason`, and `kind` when it applies to one kind of the project only. A suspend takes the actor out of every draw it applies to until a later resume; a person suspends an actor whose provider has locked it in a way the pool check cannot see. Older ledgers may hold `drop`, which stops an actor in a kind like a suspend.
 
-`epoch`: `actor`, `signal` (`success` or `cost`) and `observations`, written by `close`, `verdict` or `overturn` when the actor's results since its last epoch show a change more than 95% likely. The model then treats the actor's later tasks as a new level that starts from its old estimate.
+`epoch`: `actor`, `identity`, `signal` (`success` or `cost`) and `observations`, written by `close`, `verdict` or `overturn` when the actor's results since its last epoch show a change more than 95% likely. The model then treats the actor's later tasks as a new level that starts from its old estimate.
+
+`actors`: `actors`, a table from actor name to identity, for the tasks and events before opens recorded identities. `delegate migrate` writes it from the project's earlier config. A name an event does not describe is resolved through the latest `actors` event of its ledger, then through the roster; a name neither describes is an actor of its own, without attributes.
 
 
 ## Commands
@@ -156,9 +159,10 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `delegate verdict TASK --outcome ..` | `verdict`, and `epoch` on a change | |
 | `delegate overturn ROOT --redo-cost N --reason .. [--found-by TASK] [--defect integrity]` | `overturn`, and `epoch` on a change | ROOT is the task whose commit introduced the overturned code |
 | `delegate amend TASK --reason .. [--actor-cost N] [--lead-cost N] [--brief-cost N] [--run-minutes N] [--aop-run ID..] [--commit SHA..] [--report PATH] [--score N] [--score-reason ..] [--from-aop] [--from-lead-session [--lead-session ID]] [--by WHO]` | `amend` | corrects a closed task's fields, recording each old and new value; `--from-aop` refills actor cost and run minutes from aop's records of its runs, and `--from-lead-session` its lead cost and brief from the lead's session; a list option replaces the recorded list |
-| `delegate suspend\|resume ACTOR [KIND] --reason ..` | the event | an actor from the host roster, or `lead` |
-| `delegate scorecard [KIND]` | nothing | prints each actor's record per kind: tasks, those still pending, verdicts, results that stood, integrity defects, epochs, rescored tasks, `spend` (actor and lead cost of its closed tasks, aborted and failed ones included) and `spend_per_stood`, with the model's current `q`, `cost` and `unit` (cost per standing result) |
+| `delegate suspend\|resume ACTOR [KIND] --reason ..` | the event | an actor from the host roster, or `lead`; the event records its identity |
+| `delegate scorecard [KIND]` | nothing | prints each actor's record per kind, counting the tasks it did under any name (listed in `names`): tasks, those still pending, verdicts, results that stood, integrity defects, epochs, rescored tasks, `spend` (actor and lead cost of its closed tasks, aborted and failed ones included) and `spend_per_stood`, with the model's current `q`, `cost` and `unit` (cost per standing result) |
 | `delegate candidates [--agent A..] [--all-agents] [--limit N]` | nothing | lists the models aop offers that the host roster does not run, for the agents it runs, priciest first, with each agent's pool room |
+| `delegate migrate` | `actors` | for a config from before 0.2.0: records in its ledger the identity of every actor its `[executors]` named, and of the roster's lead, and lists the keys the config must drop. It reads the config as plain TOML; run it once, before removing `[executors]` |
 | `delegate reap` | `close` with `aborted` | closes every open with no started event within the lease as aborted; every other command runs it first; a running task keeps its reservation until the lead closes it |
 
 Every command finds `delegate.toml` by walking up from the current directory, or takes `--config PATH`.

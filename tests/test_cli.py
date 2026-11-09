@@ -394,6 +394,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, overturn["defect"]), (0, "integrity"))
         self.assertTrue(cli.Ledger(self.directory / "ledger.jsonl").read().tasks[run["task"]].integrity)
 
+    def test_migrate_records_an_earlier_config_s_actors_and_lists_its_removed_keys(self):
+        config = self.directory / "delegate.toml"
+        config.write_text(
+            "wait_deadline_minutes = 60\n"
+            + BASE.replace('check = "gated"', 'check = "gated"\nstate = "on"')
+            + '\n[executors.luna]\nagent = "codex"\nmodel = "gpt-6-luna"\neffort = "max"\n'
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cli.main(["--config", str(config), "migrate"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["actors"]["luna"], {"agent": "codex", "model": "gpt-6-luna", "effort": "max"})
+        self.assertEqual(result["actors"]["lead"]["role"], "lead")
+        self.assertEqual(sorted(result["remove"]), ["executors", "kinds.tool.state", "wait_deadline_minutes"])
+        self.assertEqual(self.events()[-1]["event"], "actors")
+        with redirect_stdout(io.StringIO()):
+            cli.main(["--config", str(config), "migrate"])
+        self.assertEqual(sum(e["event"] == "actors" for e in self.events()), 1)
+
     def test_every_error_prints_json_and_exits_2(self):
         for args in (
             ["select", "nosuch", "bounded"],

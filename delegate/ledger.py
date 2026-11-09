@@ -21,8 +21,9 @@ AMENDABLE = (
     "score.value",
     "score.reason",
 )
-# drop is read from earlier ledgers as a suspension in its kind; epoch marks a detected change in an actor.
-OTHER_EVENTS = ("overturn", "suspend", "resume", "drop", "epoch")
+# drop is read from earlier ledgers as a suspension in its kind; epoch marks a detected change in an actor; actors
+# records who each actor name meant in tasks opened before opens recorded it themselves.
+OTHER_EVENTS = ("overturn", "suspend", "resume", "drop", "epoch", "actors")
 OUTCOMES = ("held", "steered", "corrected", "aborted", "awaiting")
 FINAL = ("held", "steered", "corrected")
 
@@ -125,6 +126,7 @@ class State:
     events: list[dict] = field(default_factory=list)
     tasks: dict[str, Task] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    actors: dict[str, dict] = field(default_factory=dict)  # name -> {agent, model, effort}, from actors events
 
 
 def fold(events: list[dict]) -> State:
@@ -150,6 +152,9 @@ def fold(events: list[dict]) -> State:
             root.overturned = True
             root.overturn_defect = event.get("defect") or root.overturn_defect
             root.redo_cost += float(event.get("redo_cost") or 0)
+            continue
+        if kind == "actors":
+            state.actors.update(event.get("actors") or {})
             continue
         if kind in OTHER_EVENTS:
             continue
