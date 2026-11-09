@@ -88,9 +88,10 @@ class FakePools:
         if dollars is not None and dollars < 0:
             raise AssertionError("negative cost")
         self.calls.append((target, None if dollars is None else round(dollars, 6)))
-        if self.rooms[target] in ("error", "unavailable"):
-            state = self.rooms[target]
-            return {"room": False, "marginal": 1.0, "state": state, "reasons": [f"could not check {target}"]}
+        if self.rooms[target] in ("error", "unavailable", "unavailable-full"):
+            state = self.rooms[target].removesuffix("-full")
+            answer = {"room": False, "marginal": 1.0, "state": state, "reasons": [f"could not check {target}"]}
+            return {**answer, "headroom": self.rooms[target] == "unavailable"} if state == "unavailable" else answer
         fits = target not in self.budget or (dollars or 0) <= self.budget[target]
         room = self.rooms[target] and fits
         return {

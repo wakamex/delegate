@@ -75,7 +75,21 @@ def pool_check(target: str, dollars: float | None) -> dict:
         "state": result.get("state"),
         "reasons": result.get("reasons") or ([result["error"]] if result.get("error") else []),
         **({"account": result["account_name"]} if result.get("account_name") else {}),
+        **({"headroom": headroom(result.get("windows") or [])} if result.get("state") == "unavailable" else {}),
     }
+
+
+def headroom(windows: list[dict]) -> bool:
+    """For a pool the check cannot price a run on: whether every window is below what its pace allows by now, so
+    one more run of unknown size can start. A window without a reading leaves no room, and so does a pool whose
+    windows are priced, since the check then called it unavailable for another reason, such as a stale reading."""
+    return bool(windows) and all(
+        w.get("run_points") is None
+        and w.get("used_pct") is not None
+        and w.get("allowed_pct") is not None
+        and w["used_pct"] < w["allowed_pct"]
+        for w in windows
+    )
 
 
 def marginal(windows: list[dict]) -> float:

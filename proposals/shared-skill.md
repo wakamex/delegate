@@ -61,7 +61,7 @@ A task's lead cost is every lead turn whose triggering message names the task, i
 ## Capacity
 
 Every limited thing is a capacity: a pool window, a pool's `runs` cap, a shared machine, a checkout, an amount of memory. Each has a reading, the runs open on it across the host, and a health state. One layer does two things:
-- Gate: a task starts only if every capacity it needs fits, at the 90th percentile of its predicted use (pool points from A, minutes from T), with what is open. A pool whose run size is unmeasured takes one run at a time. A quota stop blocks the pool until its reset; an outage or capacity error blocks it with backoff.
+- Gate: a task starts only if every capacity it needs fits, at the 90th percentile of its predicted use (pool points from A, minutes from T), with what is open. A pool whose run size is unmeasured takes one run at a time, while each window is under its pace. A quota stop blocks the pool until its reset; an outage or capacity error blocks it with backoff.
 - Price: a scarcity multiplier per pool, 1 for pay-per-token pools; for subscriptions 0.05 when the window's quota will expire unused, 1 at steady pace, and rising above 1 as pace binds. The floor keeps relative prices meaningful on spare quota, so haiku still beats opus at equal quality. Records stay in stationary dollars.
 
 ## Choosing

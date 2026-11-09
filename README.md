@@ -14,7 +14,7 @@ uv tool install git+https://github.com/wakamex/delegate
 
 It needs Python 3.12 or later and [NumPy](https://numpy.org). It reads the run records of [aop (agent orchestration process)](https://github.com/wakamex/agent-orchestration-process) for executor costs, and takes the lead's turns from `sch` and its per-response costs from `clanker-analytics session-costs` in [clanker-analytics](https://github.com/wakamex/clanker-analytics).
 
-Pools are checked by a command taking `--check TARGET [--cost DOLLARS]` that prints one JSON line with the pool's windows and exits 0 when the run fits, 1 or 3 when it does not, and 2 on an error; a pool it cannot price takes one run at a time. `delegate` uses `usage-burn` on `PATH`, or the command named by `DELEGATE_USAGE_BURN`; without one it checks no pool, and `select` says so in its output.
+Pools are checked by a command taking `--check TARGET [--cost DOLLARS]` that prints one JSON line with the pool's windows and exits 0 when the run fits, 1 or 3 when it does not, and 2 on an error; a pool it cannot price a run on takes one run at a time, and only while every window is below what its pace allows by now. `delegate` uses `usage-burn` on `PATH`, or the command named by `DELEGATE_USAGE_BURN`; without one it checks no pool, and `select` says so in its output.
 
 ## Usage
 

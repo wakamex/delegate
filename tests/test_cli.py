@@ -69,6 +69,14 @@ class PoolCheckTests(unittest.TestCase):
         unavailable, _ = self.check("unavailable", "zcode", None)
         self.assertEqual((unavailable["room"], unavailable["state"]), (False, "unavailable"))
 
+    def test_an_unpriced_pool_has_headroom_only_while_every_window_is_under_its_pace(self):
+        # Cursor's month at 4% used against 56% allowed by now, as usage-burn reported it on 2026-11-08.
+        self.assertTrue(cli.headroom([{"used_pct": 4.05, "allowed_pct": 56.27}]))
+        self.assertFalse(cli.headroom([{"used_pct": 4.05, "allowed_pct": 56.27}, {"used_pct": 90, "allowed_pct": 80}]))
+        # Muse's windows are priced, so its check was unavailable for a 23-hour-old reading, not a missing price.
+        self.assertFalse(cli.headroom([{"used_pct": 0.0, "allowed_pct": 16.8, "run_points": 2.1}]))
+        self.assertFalse(cli.headroom([]))
+
     def test_a_check_that_cannot_be_made_has_no_room_and_says_why(self):
         result, _ = self.check("error", "agy", None)
         self.assertEqual((result["room"], result["state"]), (False, "error"))

@@ -243,6 +243,9 @@ class SelectionTests(unittest.TestCase):
             resources={},
         )
         self.assertEqual(choose(self.config, book, e=env(rooms=rooms))[0]["answer"], "wait")
+        # A pool already at what its pace allows takes none.
+        full = {**rooms, "cheap-pool": "unavailable-full"}
+        self.assertEqual(choose(self.config, e=env(rooms=full))[0]["answer"], "wait")
 
     def test_the_lead_takes_one_task_at_a_time(self):
         book = Book().add(

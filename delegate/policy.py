@@ -648,7 +648,7 @@ def _pool_room(world, env, name, fc, j, open_keys, roster) -> dict:
     if host.lead and pool == host.lead.pool and name != LEAD:
         upper += float(fc.brief[:, j].mean() + fc.post[:, j].mean())
     room = env.pool(pool, upper + in_flight)
-    if room.get("state") == "unavailable" and not on_pool:
+    if room.get("state") == "unavailable" and room.get("headroom") and not on_pool:
         return {**room, "room": True, "marginal": 1.0, "unmeasured": True}
     return room
 
