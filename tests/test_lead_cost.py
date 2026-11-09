@@ -66,6 +66,24 @@ class ChargedTurns(unittest.TestCase):
         second = charged_lead_cost(turns, costs, [], at(6), other_opens=[at(3)])
         self.assertEqual((first, second), (3.0, 28.0))  # the second also takes the rest of the turn, its launch
 
+    def test_the_lead_s_own_task_takes_every_turn_while_it_is_alone_except_other_tasks_turns(self):
+        # As in w3sim's port-0229: the lead worked its own task in turns that user messages and agent-job notices
+        # for other jobs started, which charged it 3.32 of the 9.53 its session spent while it was open.
+        turns = [
+            (at(0), "do port-0229 yourself"),
+            (at(10), "continue"),  # the lead's own work: charged
+            (at(20), "Job job-port-0226 succeeded"),  # an executor task's notice: charged to that task
+            (at(30), "Job build-7 succeeded"),  # the lead's own build: charged
+        ]
+        costs = [(at(1), 1.0), (at(11), 2.0), (at(21), 4.0), (at(31), 8.0)]
+        own = [(at(0), None)]
+        self.assertEqual(
+            charged_lead_cost(turns, costs, ["port-0229"], at(0), own=own, other_names=["job-port-0226"]), 11.0
+        )
+        # While another of the lead's own tasks is open, unnamed turns go to neither.
+        self.assertEqual(charged_lead_cost(turns, costs, ["port-0229"], at(0), own=[(at(0), at(5))]), 1.0)
+        self.assertEqual(cli._alone(at(0), None, [(at(5), at(25))]), [(at(0), at(5)), (at(25), None)])
+
     def test_cost_before_the_first_turn_is_charged_to_none(self):
         self.assertEqual(charged_lead_cost(TURNS, [(at(0).replace(hour=11), 9.0)], ["job-port-7"], at(0)), 0.0)
 

@@ -199,7 +199,7 @@ def runs_minutes(results: list[dict]) -> float:
     return sum(float(r.get("duration_seconds") or 0) for r in results) / 60
 
 
-def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
+def charged_lead_cost(turns, costs, names, opened, other_opens=(), own=(), other_names=()) -> float:
     """Sum the lead cost charged to a task: each turn whose triggering message names one of NAMES (its agent-job
     units or aop runs), and its part of the turn in which it was opened, which holds its brief. Every cost row
     belongs to the latest turn started at or before it; other turns, including the user's own and those before the
@@ -208,7 +208,11 @@ def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
     A turn can open several tasks, so the opening turn is split among them at the times they were opened (this
     task's OPENED and OTHER_OPENS): each takes the responses from the previous opening, or the turn's start, up to
     its own, which hold its brief, and the last one opened also takes the rest of the turn, which holds its
-    launch. Nothing is charged to two tasks."""
+    launch. Nothing is charged to two tasks.
+
+    For the lead's own task, OWN lists the spans in which it was the lead's only open own task: every turn starting
+    in one of them is the task's too, unless its trigger names another task (OTHER_NAMES) or another task opened in
+    it, since the lead works its own task in turns started by anything."""
     starts = [start for start, _ in turns]
 
     def turn_of(moment):
@@ -217,11 +221,22 @@ def charged_lead_cost(turns, costs, names, opened, other_opens=()) -> float:
     # A name matches only as a whole token, so a unit job-ab does not match a message about job-ab2.
     patterns = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in names if name]
     opening = turn_of(opened)
+    others = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in other_names if name]
+    opened_elsewhere = {turn_of(t) for t in other_opens}
+
+    def own_turn(i, start, text):
+        return (
+            i != opening
+            and any(a <= start and (b is None or start <= b) for a, b in own)
+            and i not in opened_elsewhere
+            and not any(p.search(text) for p in others)
+        )
+
     # A turn before the one that opened the task belongs to an earlier task, even one that reused its unit's name.
     charged = {
         i
-        for i, (_, text) in enumerate(turns)
-        if (opening is None or i >= opening) and any(p.search(text) for p in patterns)
+        for i, (start, text) in enumerate(turns)
+        if (opening is None or i >= opening) and (any(p.search(text) for p in patterns) or own_turn(i, start, text))
     }
     segment_start, segment_end = None, None
     if opening is not None:
@@ -279,10 +294,10 @@ def lead_session(config, given: str | None = None) -> str | None:
     return given or os.environ.get("DELEGATE_LEAD_SESSION") or config.lead_session
 
 
-def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) -> tuple[float, float] | None:
+def lead_cost_from_session(config, task, runs=(), session=None, others=()) -> tuple[float, float] | None:
     """The lead's turns charged to TASK, from the lead session's turns and priced responses as clanker-analytics
-    reads them, in total and before the task started (its brief). Unknown when there is no session or
-    clanker-analytics cannot say."""
+    reads them, in total and before the task started (its brief). OTHERS are the ledger's other tasks. Unknown when
+    there is no session or clanker-analytics cannot say."""
     session = lead_session(config, session)
     if not session:
         return None
@@ -298,16 +313,44 @@ def lead_cost_from_session(config, task, runs=(), session=None, other_opens=()) 
     started = task.started or {}
     # Turns before the start can name only the task: its unit and run do not exist yet.
     names = [name for name in [task.id, *(started.get("units") or []), started.get("aop_run"), *runs] if name]
-    total = charged_lead_cost(activity["turns"], costs, names, task.opened, other_opens)
+    other_opens = [t.opened for t in others]
+    own, other_names = (), []
+    end = until or datetime.max.replace(tzinfo=UTC)
+    for other in others:
+        if other.opened <= end and (other.closed_at is None or other.closed_at >= task.opened):
+            st = other.started or {}
+            other_names += [
+                other.id,
+                *(st.get("units") or []),
+                st.get("aop_run"),
+                *((other.close or {}).get("aop_runs") or []),
+            ]
+    if task.actor == LEAD:
+        own = _alone(task.opened, until, [(t.opened, t.closed_at) for t in others if t.actor == LEAD])
+    args = (names, task.opened, other_opens, own, other_names)
+    total = charged_lead_cost(activity["turns"], costs, *args)
     began = parse_time(started["at"]) if started.get("at") else None
     brief = (
-        total
-        if began is None
-        else charged_lead_cost(
-            activity["turns"], [(m, c) for m, c in costs if m < began], names, task.opened, other_opens
-        )
+        total if began is None else charged_lead_cost(activity["turns"], [(m, c) for m, c in costs if m < began], *args)
     )
     return total, brief
+
+
+def _alone(start, end, busy) -> list[tuple]:
+    """The parts of START to END (None: still open) that no span in BUSY overlaps."""
+    spans = [(start, end)]
+    for b_start, b_end in busy:
+        cut = []
+        for a, b in spans:
+            if (b is not None and b < b_start) or (b_end is not None and b_end < a):
+                cut.append((a, b))
+                continue
+            if a < b_start:
+                cut.append((a, b_start))
+            if b_end is not None and (b is None or b_end < b):
+                cut.append((b_end, b))
+        spans = cut
+    return spans
 
 
 ENV = {
@@ -559,7 +602,7 @@ def cmd_close(config, session, args, moment):
             if run_minutes is None:
                 run_minutes = runs_minutes(results)
     measured = ENV["lead_cost"](
-        config, task, runs, args.lead_session, [t.opened for t in session.state.tasks.values() if t.id != task.id]
+        config, task, runs, args.lead_session, [t for t in session.state.tasks.values() if t.id != task.id]
     )
     lead_cost, brief = measured if measured else (None, None)
     if args.lead_cost is not None:
@@ -678,7 +721,7 @@ def cmd_amend(config, session, args, moment):
         new.setdefault("cost.actor", runs_cost(results))
         new.setdefault("minutes.run", runs_minutes(results))
     if args.from_lead_session:
-        others = [t.opened for t in session.state.tasks.values() if t.id != task.id]
+        others = [t for t in session.state.tasks.values() if t.id != task.id]
         runs = new.get("aop_runs", task.close.get("aop_runs") or [])
         measured = ENV["lead_cost"](config, task, runs, args.lead_session, others)
         if measured is None:
