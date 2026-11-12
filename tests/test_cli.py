@@ -421,6 +421,9 @@ class CliTests(unittest.TestCase):
             cli.main(["--config", str(config), "migrate"])
         self.assertEqual(sum(e["event"] == "actors" for e in self.events()), 1)
 
+    def test_ignore_pool_needs_assign(self):
+        self.assertIn("--assign", self.run_cli("select", "tool", "bounded", "--ignore-pool")[1]["error"])
+
     def test_every_error_prints_json_and_exits_2(self):
         for args in (
             ["select", "nosuch", "bounded"],

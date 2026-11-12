@@ -486,6 +486,7 @@ def select(
     assign: str | None = None,
     why: str | None = None,
     cause: str | None = None,
+    ignore_pool: bool = False,
 ) -> tuple[dict, list[dict]]:
     """The answer, and the open event to append (none for a wait)."""
     config = world.config
@@ -521,6 +522,12 @@ def select(
                 f"{assign} lacks capabilities {sorted(set(kind.capabilities) - set(host.actors[assign].capabilities))}"
             )
         fc = forecast(world, heads, kind, cls, [assign], now, bool(retry), rng)
+        # An assignment skips the draw, not the pool: a hand-picked run can overspend a pool as well as a drawn one.
+        room = None
+        if assign != LEAD and not ignore_pool:
+            room = _room(world, env, assign, fc, 0, holding(world))
+            if not room["room"]:
+                return _no_room(answer, {assign: room}, since or now), []
         return _open(
             world,
             kind,
@@ -537,6 +544,8 @@ def select(
             heads,
             why=why,
             cause=cause or "user",
+            account=(room or {}).get("account"),
+            pool_override=True if ignore_pool and assign != LEAD else None,
         )
     candidates = [
         name
@@ -567,17 +576,7 @@ def select(
             refused[name] = room
     eligible = [a for a in actors if a not in refused]
     if not eligible:
-        errors = [r for room in refused.values() if room.get("state") == "error" for r in room.get("reasons", [])]
-        waiting = {
-            **answer,
-            "answer": "wait",
-            "waiting_for": "pool room",
-            "since": (since or now).isoformat(),
-            "refused": refused,
-        }
-        if errors and len(errors) == sum(len(r.get("reasons", [])) for r in refused.values()):
-            waiting = {**waiting, "answer": "error", "error": "; ".join(dict.fromkeys(errors))}
-        return waiting, []
+        return _no_room(answer, refused, since or now), []
     scarcity = {a: max(SCARCITY_FLOOR, rooms[a].get("marginal", 1.0)) for a in actors if a != LEAD}
     lead_scarcity = max(SCARCITY_FLOOR, rooms.get(LEAD, {}).get("marginal", 1.0))
     units = fc.unit(scarcity, lead_scarcity)
@@ -609,6 +608,15 @@ def select(
         refused=refused or None,
         scarcity={a: round(s, 3) for a, s in scarcity.items() if s < 1} or None,
     )
+
+
+def _no_room(answer: dict, refused: dict, since: datetime) -> dict:
+    """A wait for pool room, or an error when every refusal was a check that could not answer."""
+    errors = [r for room in refused.values() if room.get("state") == "error" for r in room.get("reasons", [])]
+    waiting = {**answer, "answer": "wait", "waiting_for": "pool room", "since": since.isoformat(), "refused": refused}
+    if errors and len(errors) == sum(len(r.get("reasons", [])) for r in refused.values()):
+        waiting = {**waiting, "answer": "error", "error": "; ".join(dict.fromkeys(errors))}
+    return waiting
 
 
 def _room(world: World, env: Env, name: str, fc: Forecast, j: int, open_tasks) -> dict:
@@ -689,7 +697,7 @@ def _open(world, kind, cls, actor, reason, fc, predictions, reservation, token_c
         event["predictions"] = predictions
     if retry:
         event["retry_of"] = retry
-    for key in ("why", "cause", "account", "refused", "scarcity"):
+    for key in ("why", "cause", "account", "refused", "scarcity", "pool_override"):
         if extra.get(key) is not None:
             event[key] = extra[key]
     answer = {

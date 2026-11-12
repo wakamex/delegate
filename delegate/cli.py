@@ -404,6 +404,8 @@ def _world(config, session) -> policy.World:
 
 
 def cmd_select(config, session, args, moment):
+    if args.ignore_pool and not args.assign:
+        raise UsageError("--ignore-pool goes with --assign")
     resources = args.resources.split(",") if args.resources else None
     since = parse_time(args.since) if args.since else None
     result, events = policy.select(
@@ -419,6 +421,7 @@ def cmd_select(config, session, args, moment):
         args.assign,
         args.why,
         args.cause,
+        args.ignore_pool,
     )
     for event in events:
         session.append(event)
@@ -852,9 +855,14 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--token-cap", type=float)
     s.add_argument("--retry", metavar="TASK")
     s.add_argument("--since", help="when this task started waiting, from a previous wait answer")
-    s.add_argument("--assign", metavar="ACTOR", help="open for this actor, skipping the draw and pool room")
+    s.add_argument("--assign", metavar="ACTOR", help="open for this actor, skipping the draw but not its pool check")
     s.add_argument("--why", help="with --assign: who chose it and why, such as 'user: cursor confirms this fixture'")
     s.add_argument("--cause", choices=policy.CAUSES, help="with --assign: why the draw was overridden")
+    s.add_argument(
+        "--ignore-pool",
+        action="store_true",
+        help="with --assign: open even if its pool has no room, recorded on the open",
+    )
 
     s = sub.add_parser("started", help="record what holds the task's reservation")
     s.add_argument("task")

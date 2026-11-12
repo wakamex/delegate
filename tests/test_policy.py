@@ -185,6 +185,23 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(SelectError):
             choose(self.config, assign="nobody", why="x")
 
+    def test_an_assignment_waits_for_its_pool_unless_told_to_ignore_it(self):
+        full = env(rooms={"cheap-pool": True, "dear-pool": False, "lead-pool": False})
+        answer, events = choose(self.config, e=full, assign="dear", why="user: this one")
+        self.assertEqual(
+            (answer["answer"], answer["waiting_for"], list(answer["refused"]), events),
+            ("wait", "pool room", ["dear"], []),
+        )
+        broken = env(rooms={"cheap-pool": True, "dear-pool": "error", "lead-pool": True})
+        self.assertEqual(choose(self.config, e=broken, assign="dear", why="user: this one")[0]["answer"], "error")
+        answer, events = choose(self.config, e=full, assign="dear", why="user: this one", ignore_pool=True)
+        self.assertEqual((answer["actor"], events[0]["pool_override"]), ("dear", True))
+        # The lead is never pool-checked on an assignment, so it records no override either.
+        _, events = choose(self.config, e=full, assign=LEAD, why="user: mine", ignore_pool=True)
+        self.assertNotIn("pool_override", events[0])
+        self.assertEqual(full.pool.calls.count(("lead-pool", None)), 0)
+        self.assertFalse(any(t == "lead-pool" for t, _ in full.pool.calls))
+
     def test_a_kind_needing_a_capability_draws_only_actors_that_have_it(self):
         config = make_config(
             BASE.replace('classes = ["bounded", "hard"]', 'classes = ["bounded", "hard"]\ncapabilities = ["gpu"]'),

@@ -92,7 +92,7 @@ An actor is eligible when all of these hold:
 
 The choice is one of three answers:
 
-- delegate to an executor, or lead, drawn by the rule below or assigned: the user or lead names an actor that is not suspended, with the reason and its cause (difficulty, quota, capability or user), which skips the draw and the pool check but still waits for a busy resource. The cause is recorded, so the model can tell tasks assigned for their difficulty from the rest;
+- delegate to an executor, or lead, drawn by the rule below or assigned: the user or lead names an actor that is not suspended, with the reason and its cause (difficulty, quota, capability or user), which skips the draw but still waits for a busy resource and for the actor's pool, so a hand-picked run cannot overspend a pool any more than a drawn one; concord's 65 Codex runs on 2026-10-28 and 29 were picked by hand. `--ignore-pool` opens it anyway, and the open records the override. Assigning the lead checks no pool. The cause is recorded, so the model can tell tasks assigned for their difficulty from the rest;
 - wait, naming the resource or pool that is busy, when every eligible actor is blocked by a reservation or its pool. A wait opens nothing and can be asked as often as needed;
 - error, a wait in which every pool check failed to answer, so a check to fix is told apart from quota to wait for.
 
@@ -125,7 +125,7 @@ For each kind, show each actor, the lead included: its tasks, those still open o
 
 A small command, `delegate`, does the arithmetic, so no lead does it in its own context:
 
-- `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--assign ACTOR --why .. [--cause C]]`: chooses delegate, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
+- `select KIND CLASS [--resources R,...] [--token-cap N] [--retry TASK] [--assign ACTOR --why .. [--cause C] [--ignore-pool]]`: chooses delegate, wait with the busy resource or pool, or lead, gives the reason, and for every answer but wait appends the open event, reserving the named resources, in the same locked step;
 - `run` and `continue`: start and resume the chosen executor's aop run, so the ledger names every run without the lead copying ids;
 - `started`, `close`, `verdict`, `overturn`, `amend`, `suspend`, `resume`: append the events above, `close` filling costs from aop's records and clanker-analytics, and `close`, `verdict` and `overturn` appending an epoch when the actor has changed;
 - `scorecard`: prints each kind's actors.

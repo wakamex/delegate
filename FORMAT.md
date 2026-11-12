@@ -101,6 +101,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 | `scarcity` | the actors whose pool was priced below 1 for quota due to expire, with that price |
 | `refused` | the actors whose pool had no room, with the check's answer |
 | `account` | for an executor whose pool has several accounts, such as Claude's: the account the pool check chose for the run to land on, by the name usage-burn gives it (`account_name`), which the launcher applies; the answer carries it too |
+| `pool_override` | `true` when `--ignore-pool` opened an assignment its pool check was skipped for |
 | `why`, `cause` | for `assigned`: who chose the actor and why, in the lead's words, and the cause: `difficulty`, `quota`, `capability` or `user` |
 | `retry_of` | the task this one retries, if any |
 | `resources` | what is reserved: `{NAME: INSTANCE}` for a resource with named instances, `{NAME: SLOTS}` for a counted one, 1 unless more were asked for, such as all of a live client a relaunch would end every job on, `{NAME: AMOUNT}` for one with a capacity in units. A task is admitted only while every reserved amount fits under its capacity, which is how a project keeps two 16 GB jobs off a 31 GB host at once; a host resource counts every project's tasks |
@@ -151,7 +152,7 @@ A task's record is its events folded in order: later fields replace earlier ones
 
 | Command | Writes | Does |
 |---|---|---|
-| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--assign ACTOR --why .. [--cause C]] [--since TIME]` | `open`, except for wait | prints `delegate`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`, to pass back as `--since`. An `error` answer is a wait in which every pool check failed to answer, and exits 2 |
+| `delegate select KIND CLASS [--resources R[=AMOUNT],..] [--token-cap N] [--retry TASK] [--assign ACTOR --why .. [--cause C] [--ignore-pool]] [--since TIME]` | `open`, except for wait | prints `delegate`, `wait`, `lead` or `error` with the actor, task id, reserved instances (such as the checkout to pass as aop's `--workdir`) and reason, as one JSON line. A wait answer carries `since`, to pass back as `--since`. An `error` answer is a wait in which every pool check failed to answer, and exits 2. `--assign` skips the draw but checks the actor's pool, answering wait or error like the draw; `--ignore-pool` opens it anyway. The lead's pool is not checked on an assignment |
 | `delegate run TASK --prompt-file PATH` | `started` | starts the task's executor in aop as the agent-job unit named after the task: its agent, model and effort, `[launch]`'s workdir and profile, `--no-web` when the kind requires it, and the Claude home of the account the open names. The unit reports to the lead's route when it ends |
 | `delegate continue TASK --prompt-file PATH` | `started` | resumes the task's latest aop run with a follow-up prompt, as unit `TASK-rN` on the same account |
 | `delegate started TASK [--aop-run ID] [--unit NAME..]` | `started` | for a run started some other way; a later started event adds its units to the task's |
