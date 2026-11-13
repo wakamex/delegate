@@ -991,7 +991,7 @@ def migrate(path: Path, moment: datetime) -> dict:
         for name, e in (data.get("executors") or {}).items()
         if isinstance(e, dict) and e.get("agent") and e.get("model")
     }
-    lead = load_host().lead
+    lead = load_host().lead  # the roster's: an earlier config named no lead model
     if lead:
         actors[LEAD] = lead.identity
     removed = [key for key in data if key in REMOVED]

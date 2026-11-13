@@ -322,6 +322,27 @@ class IdentityTests(unittest.TestCase):
         config = make_config(host=HOST + '\n[actors.opus]\nagent = "claude"\nmodel = "claude-opus-5-5"\n')
         self.assertNotEqual(policy.actor_key(config, "opus"), policy.actor_key(config, LEAD))
 
+    def test_a_project_may_run_its_own_lead(self):
+        # As w3sim's lead-only trial on agy while the other projects' leads stay on the roster's Claude lead.
+        own = BASE.replace(
+            "lease_minutes = 30\n",
+            'lease_minutes = 30\n\n[lead]\nagent = "agy"\nmodel = "gemini-4-carbon-medium"\npool = "agy:Gemini"\n',
+        )
+        config = make_config(own)
+        self.assertEqual(policy.actor_key(config, LEAD), "agy/gemini-4-carbon-medium@lead")
+        self.assertEqual(policy.actor_key(self.config, LEAD), "claude/claude-opus-5-5@lead")
+        _, events = choose(config, assign=LEAD, why="user: lead-only trial", cause="user")
+        self.assertEqual(events[0]["identity"]["model"], "gemini-4-carbon-medium")
+        # Another project's lead task with no recorded identity resolves through that project's config.
+        book = Book()
+        task = book.task("tool", LEAD, "held")
+        w = world(config, book)
+        w.projects["other"] = (self.config, book.state())
+        self.assertEqual(policy.task_key(w, "other", w.projects["other"][1].tasks[task]), "claude/claude-opus-5-5@lead")
+        self.assertEqual(
+            policy.task_key(w, "test", w.projects["test"][1].tasks[task]), "agy/gemini-4-carbon-medium@lead"
+        )
+
     def test_an_actors_event_says_who_old_names_meant(self):
         # Before opens recorded identities, this project called the roster's cheap actor "devin".
         book = Book().add(event="actors", actors={"devin": {"agent": "devin", "model": "swe-2-high", "effort": None}})

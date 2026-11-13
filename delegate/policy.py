@@ -80,7 +80,7 @@ def load_world(config: Config, state: State, read) -> World:
 
 def _actor(config: Config, name: str) -> Actor | None:
     if name == LEAD:
-        return config.host.lead
+        return config.lead
     return config.host.actors.get(name)
 
 
@@ -99,10 +99,12 @@ def identity(world: World, project: str, name: str, recorded: dict | None = None
     events before opens recorded it, else the roster's actor of that name."""
     if recorded:
         return recorded
-    described = world.projects[project][1].actors.get(name) if project in world.projects else None
+    config, state = world.projects.get(project, (world.config, None))
+    described = state.actors.get(name) if state else None
     if described:
         return described
-    actor = _actor(world.config, name)
+    # Each project has its own lead, so a name another project's ledger uses resolves in that project's config.
+    actor = _actor(config, name)
     return actor.identity if actor else None
 
 
@@ -121,7 +123,7 @@ def actor_key(config: Config, name: str) -> str:
 
 def _roster(config: Config) -> dict[str, Actor]:
     """The roster's actors, the lead included, by key."""
-    actors = [*config.host.actors.values(), *([config.host.lead] if config.host.lead else [])]
+    actors = [*config.host.actors.values(), *([config.lead] if config.lead else [])]
     return {key_of(a.identity, a.name): a for a in actors}
 
 
@@ -629,7 +631,7 @@ def _room(world: World, env: Env, name: str, fc: Forecast, j: int, open_tasks) -
 
 def _pool_room(world, env, name, fc, j, open_keys, roster) -> dict:
     host = world.config.host
-    actor = host.lead if name == LEAD else host.actors.get(name)
+    actor = world.config.lead if name == LEAD else host.actors.get(name)
     pool = actor.pool if actor else None
     mean_cost = float(fc.cost[:, j].mean())
     upper = mean_cost * math.exp(1.28 * float(fc.cost_sd[j]))
@@ -653,7 +655,8 @@ def _pool_room(world, env, name, fc, j, open_keys, roster) -> dict:
     if not pool:
         return {"room": True, "marginal": 1.0, "state": "unchecked"}
     in_flight = sum(float((t.open.get("expected") or {}).get("cost") or 0) for t in on_pool)
-    if host.lead and pool == host.lead.pool and name != LEAD:
+    lead = world.config.lead
+    if lead and pool == lead.pool and name != LEAD:
         upper += float(fc.brief[:, j].mean() + fc.post[:, j].mean())
     room = env.pool(pool, upper + in_flight)
     if room.get("state") == "unavailable" and room.get("headroom") and not on_pool:

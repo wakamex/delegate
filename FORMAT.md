@@ -47,6 +47,9 @@ lease_minutes = 30                       # an open with no started event is clos
 
 [lead]
 session = "0123abcd"                     # the lead's session id, a default for lead cost
+# agent = "agy"                          # optional: this project's own lead, when it is not the roster's [lead];
+# model = "gemini-4-carbon-medium"       # takes the roster actor keys (agent, model, effort, pool, price, runs)
+# pool = "agy:Gemini"
 
 [resources]
 checkout = ["sim-a", "sim-b", "sim-c", "sim-d"]  # named instances, one task each
@@ -68,6 +71,8 @@ capabilities = []                        # every actor here must have these
 resources = ["checkout", "live-client"]  # what a task of this kind reserves by default; "host-memory-gb=16" reserves an amount, "live-client=2" two slots
 investigation = false                    # true for a kind of bounded investigations
 ```
+
+A project whose lead runs on another model than the roster's `[lead]` declares it in its own `[lead]` table, with the roster's actor keys; its lead tasks then record that identity, and other projects keep the roster's lead. Lead tasks opened before it keep the identity they recorded.
 
 `check` and `measure` are required for every kind, and every table rejects keys it does not define, so a misspelt key is an error rather than a silent default. A kind may reserve the host's shared resources too; a project may not declare one under the same name. Keys a config may carry from an earlier version are rejected with a message saying where each went: `[executors]`, `[pools]`, `[candidates]` and `[lead] pool` moved to the host roster; `[kinds.NAME] state` and `class_state` are gone because the lead competes in every draw; `wait_deadline_minutes` is gone because a task waits only for capacity; and `need`, `dollars_per_point`, `need_short`, `[lead] grain` and `[kinds.NAME] references` are gone.
 

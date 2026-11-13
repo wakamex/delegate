@@ -96,6 +96,12 @@ class Config:
     kinds: dict[str, Kind]
     launch: Launch = field(default_factory=Launch)
     host: Host = field(default_factory=lambda: Host(None, {}, None, {}, {}, []))
+    own_lead: Actor | None = None  # the project's own lead, when it is not the roster's
+
+    @property
+    def lead(self) -> Actor | None:
+        """This project's lead: its own [lead] agent and model, else the roster's."""
+        return self.own_lead or self.host.lead
 
     @property
     def root(self) -> Path:
@@ -271,7 +277,9 @@ def load(path: Path, host: Host | None = None) -> Config:
             raise ConfigError(f"{key} is required")
     host = host if host is not None else load_host()
     lead = data.get("lead", {})
-    _known(lead, {"session"}, "lead")
+    _known(lead, {"session"} | ACTOR_KEYS, "lead")
+    own = {k: v for k, v in lead.items() if k != "session"}
+    own_lead = _actor(LEAD, own, "lead") if own else None
     resources = {name: _resource(name, value, "resources") for name, value in data.get("resources", {}).items()}
     for name in resources:
         if name in host.resources:
@@ -321,6 +329,7 @@ def load(path: Path, host: Host | None = None) -> Config:
             memory=launch.get("memory", "12G"),
         ),
         host=host,
+        own_lead=own_lead,
     )
 
 
