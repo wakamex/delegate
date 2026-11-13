@@ -425,6 +425,32 @@ class ScorecardTests(unittest.TestCase):
         self.assertEqual((row["tasks"], row["stood"], row["spend"], row["spend_per_stood"]), (3, 1, 3.0, 3.0))
         self.assertEqual({r["actor"] for r in rows}, {"cheap", "dear", LEAD})
 
+    def test_an_executor_s_task_that_never_started_cost_nothing(self):
+        # As w3sim's port-0140, stopped before launch: nothing ran, so its actor cost is known to be zero.
+        book = Book()
+        book.add(
+            event="open",
+            task="port-0140",
+            kind="port",
+            **{"class": "bounded"},
+            actor="cheap",
+            reason="draw",
+            resources={},
+        )
+        book.add(event="close", task="port-0140", outcome="aborted", cost={"actor": None, "lead": 0.35})
+        book.add(
+            event="open",
+            task="port-0188",
+            kind="port",
+            **{"class": "bounded"},
+            actor=LEAD,
+            reason="assigned",
+            resources={},
+        )
+        book.add(event="close", task="port-0188", outcome="aborted", cost={"actor": None, "lead": None})
+        tasks = book.state().tasks
+        self.assertEqual((tasks["port-0140"].cost("actor"), tasks["port-0188"].cost("actor")), (0.0, None))
+
     def test_an_unknown_cost_is_counted_apart_not_as_free(self):
         book = Book()
         book.task("tool", LEAD, "held", cost=4.0)

@@ -125,9 +125,16 @@ class Task:
         return None
 
     def cost(self, part: str) -> float | None:
-        """The recorded actor or lead cost, or None where unknown."""
+        """The recorded actor or lead cost, or None where unknown. An executor's task that never started and has
+        no aop run ran nothing, so its actor cost is nothing; the lead's own task can spend turns without a run."""
         value = ((self.close or {}).get("cost") or {}).get(part)
+        if value is None and part == "actor" and self.never_ran:
+            return 0.0
         return None if value is None else float(value)
+
+    @property
+    def never_ran(self) -> bool:
+        return bool(self.close) and self.actor != "lead" and self.started is None and not self.close.get("aop_runs")
 
 
 @dataclass
