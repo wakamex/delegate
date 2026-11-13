@@ -425,6 +425,15 @@ class ScorecardTests(unittest.TestCase):
         self.assertEqual((row["tasks"], row["stood"], row["spend"], row["spend_per_stood"]), (3, 1, 3.0, 3.0))
         self.assertEqual({r["actor"] for r in rows}, {"cheap", "dear", LEAD})
 
+    def test_an_unknown_cost_is_counted_apart_not_as_free(self):
+        book = Book()
+        book.task("tool", LEAD, "held", cost=4.0)
+        book.task("tool", LEAD, "held", cost=None)  # a lead session nobody could read
+        book.task("tool", "cheap", "held", cost=1.0, lead_cost=None)
+        rows = {r["actor"]: r for r in policy.scorecard(world(make_config(), book), env(), NOW, "tool")}
+        self.assertEqual((rows[LEAD]["unpriced"], rows[LEAD]["spend"], rows[LEAD]["spend_per_stood"]), (1, 4.0, 4.0))
+        self.assertEqual((rows["cheap"]["unpriced"], rows["cheap"]["spend_per_stood"]), (1, None))
+
 
 if __name__ == "__main__":
     unittest.main()

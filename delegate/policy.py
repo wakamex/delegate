@@ -805,6 +805,16 @@ def _trend(world: World, project: str, task: Task, key: str) -> float:
 # ---- the scorecard ------------------------------------------------------------------------------
 
 
+def _priced(task: Task) -> bool:
+    """Whether every cost the task incurred is known: its actor's, and the lead's for an executor's task."""
+    return task.cost("actor") is not None and (task.actor == LEAD or task.cost("lead") is not None)
+
+
+def _spend(task: Task) -> float:
+    """What the task is known to have cost: its actor, the lead, and redoing what an overturn of it broke."""
+    return (task.cost("actor") or 0) + (task.cost("lead") or 0) + task.redo_cost
+
+
 def scorecard(world: World, env: Env, now: datetime, only: str | None = None) -> list[dict]:
     """Each actor's record and current forecast per kind of this project. Tasks count toward the roster actor they
     were, under any name; an actor no longer in the roster keeps its record under its old name, without a forecast."""
@@ -834,8 +844,14 @@ def scorecard(world: World, env: Env, now: datetime, only: str | None = None) ->
             name, tasks = label[key], mine.get(key, [])
             j = roster.index(name) if name in roster and actor_key(config, name) == key else None
             final = [t for t in tasks if t.stood is not None]
-            spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) for t in tasks if t.close)
+            closed = [t for t in tasks if t.close]
+            # A cost nobody could read is unknown, not free: such tasks are counted apart, and spend per standing
+            # result is taken over the tasks whose costs are all known, so a lead with unread sessions does not
+            # look cheap. A reaped open never ran and cost nothing.
+            priced = [t for t in closed if t.reaped or _priced(t)]
+            spend = sum(_spend(t) for t in closed)
             stood = sum(1 for t in final if t.stood)
+            priced_stood = sum(1 for t in priced if t.stood)
             rows.append(
                 {
                     "kind": kind.name,
@@ -852,7 +868,10 @@ def scorecard(world: World, env: Env, now: datetime, only: str | None = None) ->
                         1 for p, e in world.events if e.get("event") == "epoch" and event_key(world, p, e) == key
                     ),
                     "spend": round(spend, 2),
-                    "spend_per_stood": round(spend / stood, 2) if stood else None,
+                    "unpriced": len(closed) - len(priced),
+                    "spend_per_stood": round(sum(_spend(t) for t in priced) / priced_stood, 2)
+                    if priced_stood
+                    else None,
                     "q": None if j is None else round(float(fc.q[:, j].mean()), 3),
                     "cost": None if j is None else round(float(fc.cost[:, j].mean()), 2),
                     "unit": None if j is None else round(float(np.median(units[:, j])), 2),
