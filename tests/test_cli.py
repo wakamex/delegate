@@ -350,14 +350,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_reap_closes_an_open_that_never_started(self):
-        _, never = self.run_cli("select", "tool", "bounded", "--resources", "checkout")
-        _, running = self.run_cli("select", "tool", "bounded", "--resources", "checkout")
+        _, never = self.run_cli(
+            "select", "tool", "bounded", "--resources", "checkout", "--assign", "cheap", "--why", "x"
+        )
+        _, running = self.run_cli(
+            "select", "tool", "bounded", "--resources", "checkout", "--assign", "dear", "--why", "x"
+        )
         self.run_cli("started", running["task"], "--aop-run", "r1", "--unit", "m4-a")
         self.at(NOW + timedelta(minutes=31))
         code, result = self.run_cli("reap")
         self.assertEqual((code, result["reaped"]), (0, [{"task": never["task"], "event": "close"}]))
         _, again = self.run_cli("select", "tool", "bounded", "--resources", "checkout")
         self.assertEqual(again["resources"], {"checkout": "a"})
+
+    def test_the_lead_s_own_task_is_not_reaped(self):
+        # As w3sim's port-0262 to port-0269 were: the lead worked them itself, with no run to send a started event.
+        _, own = self.run_cli("select", "port", "first-reading", "--assign", LEAD, "--why", "user: solo track")
+        self.at(NOW + timedelta(hours=2))
+        self.assertEqual(self.run_cli("reap")[1]["reaped"], [])
+        code, closed = self.run_cli("close", own["task"], "--outcome", "held", "--score", "80", "--score-reason", "x")
+        self.assertEqual((code, closed["outcome"]), (0, "held"))
+
+    def test_a_close_replaces_a_reap_and_ends_at_it(self):
+        _, task = self.run_cli(
+            "select", "port", "bounded", "--assign", "cheap", "--why", "x", "--resources", "checkout"
+        )
+        self.at(NOW + timedelta(minutes=40))
+        self.run_cli("reap")
+        self.at(NOW + timedelta(days=1))
+        code, closed = self.run_cli(
+            "close", task["task"], "--outcome", "held", "--score", "80", "--score-reason", "x", "--commit", "a30742f3"
+        )
+        self.assertEqual(
+            (code, closed["replaces"], closed["ended"]), (0, "reap", (NOW + timedelta(minutes=40)).isoformat())
+        )
+        self.assertEqual(closed["minutes"]["held"], {"checkout": 40.0})
+        folded = cli.Ledger(self.directory / "ledger.jsonl").read().tasks[task["task"]]
+        self.assertEqual((folded.outcome, folded.closed_at), ("held", NOW + timedelta(minutes=40)))
+        self.assertIn("already closed", self.run_cli("close", task["task"], "--outcome", "held")[1]["error"])
 
     def test_candidates_lists_models_of_the_roster_s_agents_the_roster_does_not_run(self):
         models = [

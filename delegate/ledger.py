@@ -26,6 +26,7 @@ AMENDABLE = (
 OTHER_EVENTS = ("overturn", "suspend", "resume", "drop", "epoch", "actors")
 OUTCOMES = ("held", "steered", "corrected", "aborted", "awaiting")
 FINAL = ("held", "steered", "corrected")
+REAPED = "no started event within the lease"
 
 
 class LedgerError(Exception):
@@ -83,7 +84,15 @@ class Task:
 
     @property
     def closed_at(self) -> datetime | None:
-        return parse_time(self.close["at"]) if self.close else None
+        """When the task ended: a close that replaced a reap ended at the reap."""
+        if not self.close:
+            return None
+        return parse_time(self.close.get("ended") or self.close["at"])
+
+    @property
+    def reaped(self) -> bool:
+        """Closed by reap for a missing started event, a close the actor's own close may still replace."""
+        return bool(self.close) and self.close.get("outcome") == "aborted" and self.close.get("reason") == REAPED
 
     @property
     def holding(self) -> bool:

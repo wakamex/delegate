@@ -137,6 +137,39 @@ class SessionActivity(unittest.TestCase):
         with mock.patch.dict(cli.ENV, {"session_activity": lambda session: {"turns": turns, "costs": costs}}):
             self.assertEqual(cli.lead_cost_from_session(config, fold(book.events).tasks["t"]), (3.0, 1.0))
 
+    def test_an_older_lead_task_left_open_does_not_take_a_later_one_s_turns(self):
+        # As w3sim's tool-0052, opened by the lead and never closed, held port-0262 to port-0269 at their brief.
+        config = make_config()
+        config.lead_session = "0123abcd"
+        book = Book()
+        for task, minute in (("stale", 0), ("own", 10)):
+            book.add(
+                event="open",
+                task=task,
+                kind="tool",
+                **{"class": "bounded"},
+                actor="lead",
+                reason="assigned",
+                resources={},
+            )
+            book.events[-1]["at"] = at(minute).isoformat()
+        state = fold(book.events)
+        turns = [(at(0), "open stale"), (at(9), "a long turn that opens the next task and works it")]
+        costs = [
+            (at(1), 1.0),
+            (
+                at(
+                    9,
+                ),
+                2.0,
+            ),
+            (at(11), 4.0),
+            (at(21), 8.0),
+        ]
+        with mock.patch.dict(cli.ENV, {"session_activity": lambda session: {"turns": turns, "costs": costs}}):
+            total, _ = cli.lead_cost_from_session(config, state.tasks["own"], others=[state.tasks["stale"]])
+        self.assertEqual(total, 12.0)  # from its open on, though the stale task opened first and is still open
+
     def test_reads_turns_from_sch_and_costs_from_clanker_analytics(self):
         costs = {
             "responses": [

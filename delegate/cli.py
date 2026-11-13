@@ -15,7 +15,7 @@ from pathlib import Path
 
 from delegate import policy
 from delegate.config import LEAD, REMOVED, ConfigError, find_config, load, load_host
-from delegate.ledger import Ledger, LedgerError, parse_time
+from delegate.ledger import REAPED, Ledger, LedgerError, parse_time
 from delegate.policy import Env, SelectError
 
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
@@ -210,9 +210,11 @@ def charged_lead_cost(turns, costs, names, opened, other_opens=(), own=(), other
     its own, which hold its brief, and the last one opened also takes the rest of the turn, which holds its
     launch. Nothing is charged to two tasks.
 
-    For the lead's own task, OWN lists the spans in which it was the lead's only open own task: every turn starting
-    in one of them is the task's too, unless its trigger names another task (OTHER_NAMES) or another task opened in
-    it, since the lead works its own task in turns started by anything."""
+    The lead's own task has no brief and is not split by turns: the lead works it in turns started by anything, and
+    opens its next task inside the turn that finished this one. OWN lists the spans in which it was the lead's latest
+    open own task, and it takes every response in them, except those of turns whose trigger names another task
+    (OTHER_NAMES) and the part of a turn up to opening an executor's task (OTHER_OPENS), which is that task's
+    brief."""
     starts = [start for start, _ in turns]
 
     def turn_of(moment):
@@ -221,23 +223,28 @@ def charged_lead_cost(turns, costs, names, opened, other_opens=(), own=(), other
     # A name matches only as a whole token, so a unit job-ab does not match a message about job-ab2.
     patterns = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in names if name]
     opening = turn_of(opened)
-    others = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in other_names if name]
-    opened_elsewhere = {turn_of(t) for t in other_opens}
-
-    def own_turn(i, start, text):
-        return (
-            i != opening
-            and any(a <= start and (b is None or start <= b) for a, b in own)
-            and i not in opened_elsewhere
-            and not any(p.search(text) for p in others)
-        )
-
     # A turn before the one that opened the task belongs to an earlier task, even one that reused its unit's name.
     charged = {
         i
-        for i, (start, text) in enumerate(turns)
-        if (opening is None or i >= opening) and (any(p.search(text) for p in patterns) or own_turn(i, start, text))
+        for i, (_, text) in enumerate(turns)
+        if (opening is None or i >= opening) and any(p.search(text) for p in patterns)
     }
+    if own:
+        others = [re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])") for name in other_names if name]
+        elsewhere = {i for i, (_, text) in enumerate(turns) if any(p.search(text) for p in others)} - charged
+        briefs = []
+        for t in other_opens:
+            j = turn_of(t)
+            if j is not None:
+                briefs.append((max((o for o in other_opens if turn_of(o) == j and o < t), default=starts[j]), t))
+        total = 0.0
+        for moment, cost in costs:
+            i = turn_of(moment)
+            if i is None or i in elsewhere or any(a < moment <= b for a, b in briefs):
+                continue
+            if i in charged or any(a <= moment and (b is None or moment <= b) for a, b in own):
+                total += cost
+        return round(total, 4)
     segment_start, segment_end = None, None
     if opening is not None:
         same_turn = [t for t in other_opens if turn_of(t) == opening]
@@ -315,6 +322,8 @@ def lead_cost_from_session(config, task, runs=(), session=None, others=()) -> tu
     names = [name for name in [task.id, *(started.get("units") or []), started.get("aop_run"), *runs] if name]
     other_opens = [t.opened for t in others]
     own, other_names = (), []
+    if task.actor == LEAD:
+        other_opens = [t.opened for t in others if t.actor != LEAD]
     end = until or datetime.max.replace(tzinfo=UTC)
     for other in others:
         if other.opened <= end and (other.closed_at is None or other.closed_at >= task.opened):
@@ -326,7 +335,10 @@ def lead_cost_from_session(config, task, runs=(), session=None, others=()) -> tu
                 *((other.close or {}).get("aop_runs") or []),
             ]
     if task.actor == LEAD:
-        own = _alone(task.opened, until, [(t.opened, t.closed_at) for t in others if t.actor == LEAD])
+        # The lead works its latest own task: one opened later takes over from its open while it is open, so an
+        # earlier task left open does not hold every later one's turns.
+        later = [(t.opened, t.closed_at) for t in others if t.actor == LEAD and t.opened > task.opened]
+        own = _alone(task.opened, until, later)
     args = (names, task.opened, other_opens, own, other_names)
     total = charged_lead_cost(activity["turns"], costs, *args)
     began = parse_time(started["at"]) if started.get("at") else None
@@ -369,11 +381,12 @@ ENV = {
 
 
 def reap(config, session, moment: datetime) -> list[dict]:
-    """Close as aborted every open with no started event within the lease."""
+    """Close as aborted every executor's open with no started event within the lease. The lead's own task has no
+    run to start: it is the lead's own session, which closes it."""
     written = []
     lease = timedelta(minutes=config.lease_minutes)
     for task in list(session.state.tasks.values()):
-        if task.holding and task.started is None and moment - task.opened > lease:
+        if task.holding and task.actor != LEAD and task.started is None and moment - task.opened > lease:
             written.append(
                 session.append(
                     {
@@ -381,7 +394,7 @@ def reap(config, session, moment: datetime) -> list[dict]:
                         "at": moment.isoformat(),
                         "task": task.id,
                         "outcome": "aborted",
-                        "reason": "no started event within the lease",
+                        "reason": REAPED,
                     }
                 )
             )
@@ -573,8 +586,11 @@ def _correction(args, outcome, default_caught=None):
 def cmd_close(config, session, args, moment):
     task = _task(session, args.task)
     kind = config.kinds[task.kind]
-    if task.close:
+    if task.close and not task.reaped:
         raise UsageError(f"{task.id} is already closed")
+    # A close may replace a reap: the work went on without a started event. It ended when the reap saw it, since the
+    # lead's later turns may be other work, so its costs and minutes stop there.
+    ended = task.closed_at if task.reaped else None
     outcome = args.outcome
     if kind.check == "deferred" and outcome in ("held", "steered"):
         raise UsageError("a deferred kind closes as awaiting; held comes from its verdict")
@@ -612,7 +628,8 @@ def cmd_close(config, session, args, moment):
         lead_cost, brief = args.lead_cost, None
     if task.actor == LEAD and actor_cost is None:
         actor_cost = lead_cost  # the lead's own work is its actor cost
-    held = {name: round((moment - task.opened).total_seconds() / 60, 1) for name in (task.open.get("resources") or {})}
+    end = ended or moment
+    held = {name: round((end - task.opened).total_seconds() / 60, 1) for name in (task.open.get("resources") or {})}
     event.update(
         {
             "cost": {
@@ -636,6 +653,8 @@ def cmd_close(config, session, args, moment):
     )
     if kind.investigation:
         event["falsifier_checked"] = args.falsifier_checked == "true"
+    if ended:
+        event.update(ended=ended.isoformat(), replaces="reap")
     written = session.append(event)
     epochs = _epochs(config, session, task.actor, moment)
     return {**written, "epochs": epochs} if epochs else written
