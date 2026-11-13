@@ -454,6 +454,31 @@ class CliTests(unittest.TestCase):
     def test_ignore_pool_needs_assign(self):
         self.assertIn("--assign", self.run_cli("select", "tool", "bounded", "--ignore-pool")[1]["error"])
 
+    def test_a_run_no_log_named_is_found_by_the_checkout_the_task_reserved(self):
+        # As w3sim's port-0152: the host rebooted mid-run, so its log never named the run; aop rebuilt its result.
+        config = self.directory / "delegate.toml"
+        config.write_text(config.read_text() + '\n[launch]\nworkdir = "/code/{checkout}"\n')
+        _, task = self.run_cli(
+            "select", "tool", "bounded", "--resources", "checkout", "--assign", "cheap", "--why", "x"
+        )
+        self.run_cli("started", task["task"], "--unit", task["task"])
+        runs = self.directory / ".aop" / "runs"
+        for run, workdir, minutes in (("r-mine", "/code/a", 5), ("r-other", "/code/b", 5), ("r-before", "/code/a", -5)):
+            (runs / run).mkdir(parents=True)
+            (runs / run / "request.json").write_text("{}")
+            started = (NOW + timedelta(minutes=minutes)).isoformat()
+            result = {
+                "run_id": run,
+                "project_dir": workdir,
+                "started_at": started,
+                "calculated_cost": {"amount_usd": 0.45},
+            }
+            (runs / run / "result.json").write_text(json.dumps(result))
+            (self.results / f"{run}.json").write_text(json.dumps({**result, "duration_seconds": 60}))
+        self.at(NOW + timedelta(minutes=30))
+        _, closed = self.run_cli("close", task["task"], "--outcome", "aborted", "--lead-cost", "0")
+        self.assertEqual((closed["aop_runs"], closed["cost"]["actor"]), (["r-mine"], 0.45))
+
     def test_every_error_prints_json_and_exits_2(self):
         for args in (
             ["select", "nosuch", "bounded"],

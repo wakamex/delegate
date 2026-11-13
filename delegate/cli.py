@@ -372,6 +372,7 @@ ENV = {
     "lead_cost": lead_cost_from_session,
     "session_activity": session_activity,
     "unit_runs": unit_runs,
+    "checkout_runs": lambda *args: checkout_runs(*args),  # defined below
     "launch": launch_job,
     "claude_home": claude_home,
 }
@@ -460,15 +461,58 @@ def cmd_started(config, session, args, moment):
     return session.append(event)
 
 
-def task_runs(task, given=None, until=None) -> list[str]:
+def task_runs(task, given=None, until=None, config=None) -> list[str]:
     """A task's aop runs: those its started event and GIVEN name, and those its units' logs name, which is how the
-    runs delegate launched are found, since aop gives a run its id only once it is going."""
+    runs delegate launched are found, since aop gives a run its id only once it is going. When none is linked, the
+    runs that worked in the task's reserved checkout while it held it."""
     started = task.started or {}
     runs = [r for r in [started.get("aop_run"), *(given or [])] if r]
     for run in ENV["unit_runs"](started.get("units") or [], task.opened, until):
         if run not in runs:
             runs.append(run)
+    if not runs and config is not None:
+        runs = ENV["checkout_runs"](config, task, until)
     return runs
+
+
+def checkout_runs(config, task, until=None) -> list[str]:
+    """The aop runs in the project's aop state whose directory was the task's reserved workdir and that started
+    while the task held it. The reservation gave the task that directory alone, so they are its runs, including
+    one killed before its log named it, whose result aop rebuilt from its events."""
+    launch = config.launch
+    if not launch.workdir or "{" not in launch.workdir or task.actor == LEAD:
+        return []
+    try:
+        workdir = launch.workdir.format(task=task.id, **(task.open.get("resources") or {}))
+    except (KeyError, IndexError, ValueError):
+        return []
+    runs_dir = config.root / launch.directory / ".aop" / "runs"
+    end = until or (task.closed_at if task.close else None)
+    early = task.opened.timestamp() - 60  # a run whose request predates the task is not its
+    found = []
+    try:
+        directories = list(runs_dir.iterdir())
+    except OSError:
+        return []
+    for directory in directories:
+        try:
+            made = (directory / "request.json").stat().st_mtime
+            if made < early:
+                continue
+            result = json.loads((directory / "result.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        started = result.get("started_at")
+        moment = parse_time(started) if started else None
+        if (
+            result.get("project_dir") == workdir
+            and moment
+            and moment >= task.opened
+            and (end is None or moment <= end)
+            and result.get("run_id")
+        ):
+            found.append((moment, result["run_id"]))
+    return [run for _, run in sorted(found)]
 
 
 def _launch(config, task, unit: str, aop: list[str]):
@@ -513,7 +557,7 @@ def cmd_continue(config, session, args, moment):
     task = _task(session, args.task)
     if task.close:
         raise UsageError(f"{task.id} is already closed")
-    runs = task_runs(task)
+    runs = task_runs(task, config=config)
     if not runs:
         raise UsageError(f"{task.id} has no aop run to continue; one killed before aop wrote its result cannot be")
     units = (task.started or {}).get("units") or []
@@ -612,7 +656,7 @@ def cmd_close(config, session, args, moment):
     if kind.investigation and success:
         if not args.evidence or args.falsifier_checked is None:
             raise UsageError("an investigation needs --evidence and --falsifier-checked")
-    runs = task_runs(task, args.aop_run, moment)
+    runs = task_runs(task, args.aop_run, moment, config)
     actor_cost, run_minutes = args.actor_cost, args.run_minutes
     if task.actor != LEAD and runs and actor_cost is None:
         results = [ENV["aop_result"](r) for r in runs]
@@ -734,7 +778,7 @@ def cmd_amend(config, session, args, moment):
         if args.score is not None and not 0 <= args.score <= 100:
             raise UsageError("--score is from 0 to 100")
     if args.from_aop:
-        runs = new.get("aop_runs") or task.close.get("aop_runs") or task_runs(task, None, parse_time(task.close["at"]))
+        runs = new.get("aop_runs") or task.close.get("aop_runs") or task_runs(task, None, task.closed_at, config)
         if runs != task.close.get("aop_runs"):
             new.setdefault("aop_runs", runs)
         results = [ENV["aop_result"](r) for r in runs]
