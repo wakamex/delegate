@@ -687,7 +687,8 @@ def _open(world, kind, cls, actor, reason, fc, predictions, reservation, token_c
         "kind": kind.name,
         "class": cls,
         "actor": actor,
-        "identity": identity(world, world.config.project, actor),
+        # The actor as the config declares it now; the ledger's actors event describes only earlier opens.
+        "identity": _actor(world.config, actor).identity if _actor(world.config, actor) else None,
         "reason": reason,
         "resources": reservation or {},
         "token_cap": token_cap,
@@ -748,7 +749,8 @@ def detect_epochs(world: World, actor: str, now: datetime) -> list[dict]:
         )
         for s in ("success", "cost")
     }
-    stamp = {"event": "epoch", "at": now.isoformat(), "actor": actor, "identity": identity(world, "", actor)}
+    current = _actor(world.config, actor)
+    stamp = {"event": "epoch", "at": now.isoformat(), "actor": actor, "identity": current.identity if current else None}
     # Success: each result against its predicted chance, shifted by how its kind is going for everyone lately.
     judged = sorted(
         ((t, p) for p, _, t in mine if t.stood is not None and (t.open.get("expected") or {}).get("q") is not None),
@@ -821,13 +823,16 @@ def scorecard(world: World, env: Env, now: datetime, only: str | None = None) ->
         for task in state.tasks.values():
             if task.kind == kind.name:
                 key = task_key(world, project, task)
-                label.setdefault(key, task.actor)
+                # A roster name that now means another actor, such as a lead moved to another model, keeps the
+                # earlier actor's record under its key.
+                name = task.actor if task.actor not in roster or actor_key(config, task.actor) == key else key
+                label.setdefault(key, name)
                 mine.setdefault(key, []).append(task)
         fc = forecast(world, heads, kind, kind.classes[0], roster, now, False, rng, m=200)
         units = fc.unit({}, 1.0)
         for key in dict.fromkeys([*(actor_key(config, n) for n in roster), *mine]):
             name, tasks = label[key], mine.get(key, [])
-            j = roster.index(name) if name in roster else None
+            j = roster.index(name) if name in roster and actor_key(config, name) == key else None
             final = [t for t in tasks if t.stood is not None]
             spend = sum((t.cost("actor") or 0) + (t.cost("lead") or 0) for t in tasks if t.close)
             stood = sum(1 for t in final if t.stood)

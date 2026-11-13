@@ -784,6 +784,9 @@ def cmd_actor_event(config, session, args, moment):
     if args.actor != LEAD and args.actor not in config.executors:
         raise UsageError(f"unknown actor {args.actor!r}; actors are the host roster's")
     event = {"event": args.command, "at": moment.isoformat(), "actor": args.actor, "reason": args.reason}
+    actor = config.lead if args.actor == LEAD else config.executors.get(args.actor)
+    if actor:
+        event["identity"] = actor.identity
     if args.kind is not None:
         event["kind"] = args.kind
     return session.append(event)

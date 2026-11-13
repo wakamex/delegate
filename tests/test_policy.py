@@ -331,8 +331,18 @@ class IdentityTests(unittest.TestCase):
         config = make_config(own)
         self.assertEqual(policy.actor_key(config, LEAD), "agy/gemini-4-carbon-medium@lead")
         self.assertEqual(policy.actor_key(self.config, LEAD), "claude/claude-opus-5-5@lead")
-        _, events = choose(config, assign=LEAD, why="user: lead-only trial", cause="user")
+        # The ledger's migration said the lead was Claude; a new open records the lead the config declares now.
+        migrated = Book().add(
+            event="actors", actors={LEAD: {"agent": "claude", "model": "claude-opus-5-5", "role": LEAD}}
+        )
+        _, events = choose(config, migrated, assign=LEAD, why="user: lead-only trial", cause="user")
         self.assertEqual(events[0]["identity"]["model"], "gemini-4-carbon-medium")
+        before = Book().add(
+            event="actors", actors={LEAD: {"agent": "claude", "model": "claude-opus-5-5", "role": LEAD}}
+        )
+        before.task("port", LEAD, "held", score=80)
+        earlier = next(r for r in policy.scorecard(world(config, before), env(), NOW, "port") if r["tasks"])
+        self.assertEqual((earlier["actor"], earlier["q"]), ("claude/claude-opus-5-5@lead", None))
         # Another project's lead task with no recorded identity resolves through that project's config.
         book = Book()
         task = book.task("tool", LEAD, "held")
